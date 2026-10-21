@@ -4,6 +4,7 @@
 pub mod client_hello;
 pub mod crypto_frames;
 pub mod initial;
+pub mod retry;
 
 /// Errors from QUIC first-flight parsing; every variant means "drop the datagram".
 #[derive(Debug, PartialEq, Eq)]
