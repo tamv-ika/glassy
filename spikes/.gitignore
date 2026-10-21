@@ -1,0 +1,6 @@
+.deps/
+build/
+target/
+node_modules/
+test-results/
+playwright-report/

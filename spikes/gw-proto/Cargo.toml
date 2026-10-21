@@ -1,0 +1,11 @@
+[package]
+name = "gw-proto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aes-gcm = "0.11.1"
+base64 = "0.23.1"
+data-encoding = "2.11.1"
+hex = "0.4.3"
+rand = "0.10.3"

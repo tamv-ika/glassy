@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["gw-proto"]
+# cap-probe is built standalone on remote hosts (see bench/aws), so it is not a member.
+exclude = ["cap-probe"]
+
+[profile.dev]
+# Line tables are enough for backtraces and cut linker memory substantially.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Dependencies do not need debug info.
+debug = false
