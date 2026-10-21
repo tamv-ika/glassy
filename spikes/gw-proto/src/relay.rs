@@ -16,7 +16,9 @@ use tokio::task::JoinHandle;
 
 use crate::quic::client_hello::{HelloParse, parse_sni};
 use crate::quic::crypto_frames::CryptoAssembler;
-use crate::quic::initial::{client_initial_keys, decrypt_initial, parse_initial_header};
+use crate::quic::initial::{
+    MIN_INITIAL_DATAGRAM, client_initial_keys, decrypt_initial, parse_initial_header,
+};
 use crate::quic::retry::{build_retry, mint_token, validate_token};
 use crate::stun::server_ufrag;
 use crate::ticket::{KeyRing, from_sni, from_ufrag, open};
@@ -30,6 +32,8 @@ const MAX_HELLO_DATAGRAMS: usize = 2;
 const MAX_HELLO_BYTES: usize = 8192;
 /// Retry tokens only need to survive one client round trip.
 const RETRY_TOKEN_LIFETIME_SECS: u64 = 10;
+/// RFC 9000 §7.2: a client's first Destination Connection ID is at least 8 bytes.
+const MIN_CLIENT_DCID_LEN: usize = 8;
 
 #[derive(Clone, Debug, Default)]
 pub struct Backend {
@@ -256,29 +260,38 @@ async fn handle_quic(
             .fetch_add(1, Ordering::Relaxed);
         return;
     };
+    // RFC 9000 §14.1 and §7.2: client Initials arrive in datagrams of at least 1200 bytes with a
+    // DCID of at least 8 bytes. Anything else is dropped before a Retry could amplify it.
+    if pkt.len() < MIN_INITIAL_DATAGRAM || hdr.dcid.len() < MIN_CLIENT_DCID_LEN {
+        counters
+            .dropped_unknown_flow
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     let now = u64::from(unix_now());
-    if cfg.retry == RetryMode::Always {
-        // No token, or a NEW_TOKEN token (first bit set) that only the server could validate.
-        let has_retry_token = hdr.token.first().is_some_and(|b| b & 0x80 == 0);
-        if !has_retry_token {
-            let rscid: [u8; 8] = rand::random();
-            let token = mint_token(
-                &cfg.retry_key,
-                hdr.dcid,
-                client,
-                &rscid,
-                now + RETRY_TOKEN_LIFETIME_SECS,
-            );
-            let _ = sock
-                .send_to(&build_retry(hdr.scid, &rscid, hdr.dcid, &token), client)
-                .await;
-            counters.retries_sent.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
+    // A Retry-type token (first bit 0) is checked in every mode: game servers accept such tokens
+    // from the gateway without validating them (spec §3.6), so one that this gateway did not
+    // mint must never reach them. NEW_TOKEN tokens (first bit 1) are the server's business.
+    let has_retry_token = hdr.token.first().is_some_and(|b| b & 0x80 == 0);
+    if has_retry_token {
         if validate_token(&cfg.retry_key, hdr.token, client, hdr.dcid, now).is_err() {
             counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);
             return;
         }
+    } else if cfg.retry == RetryMode::Always {
+        let rscid: [u8; 8] = rand::random();
+        let token = mint_token(
+            &cfg.retry_key,
+            hdr.dcid,
+            client,
+            &rscid,
+            now + RETRY_TOKEN_LIFETIME_SECS,
+        );
+        let _ = sock
+            .send_to(&build_retry(hdr.scid, &rscid, hdr.dcid, &token), client)
+            .await;
+        counters.retries_sent.fetch_add(1, Ordering::Relaxed);
+        return;
     }
     let Ok(initial) = decrypt_initial(pkt, &client_initial_keys(hdr.dcid)) else {
         counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);

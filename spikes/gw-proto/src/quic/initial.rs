@@ -22,7 +22,8 @@ const INITIAL_SALT_V1: [u8; 20] = [
 const TAG_LEN: usize = 16;
 const SAMPLE_LEN: usize = 16;
 /// Clients must pad datagrams carrying Initial packets to at least 1200 bytes (RFC 9000 §14.1).
-const MIN_INITIAL_DATAGRAM: usize = 1200;
+pub const MIN_INITIAL_DATAGRAM: usize = 1200;
+pub const MAX_CID_LEN: usize = 20;
 
 #[derive(Debug)]
 pub struct InitialHeader<'a> {
@@ -83,6 +84,10 @@ pub fn parse_initial_header(d: &[u8]) -> Result<InitialHeader<'_>, QuicError> {
     let dcid = take(d, &mut at, dcid_len)?;
     let scid_len = usize::from(take(d, &mut at, 1)?[0]);
     let scid = take(d, &mut at, scid_len)?;
+    // RFC 9000 §17.2: QUIC v1 connection IDs are at most 20 bytes; longer ones are dropped.
+    if dcid_len > MAX_CID_LEN || scid_len > MAX_CID_LEN {
+        return Err(QuicError::Malformed);
+    }
     let token_len = usize::try_from(take_varint(d, &mut at)?).map_err(|_| QuicError::Malformed)?;
     let token = take(d, &mut at, token_len)?;
     let length = usize::try_from(take_varint(d, &mut at)?).map_err(|_| QuicError::Malformed)?;
@@ -261,6 +266,23 @@ mod tests {
         let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(path).unwrap();
         hex::decode(text.split_whitespace().collect::<String>()).unwrap()
+    }
+
+    #[test]
+    fn connection_id_over_20_bytes_rejected() {
+        // RFC 9000 §17.2: v1 endpoints drop long headers whose CID length exceeds 20.
+        for (dcid, scid) in [(21usize, 8usize), (8, 21)] {
+            let mut pkt = vec![0xc0, 0, 0, 0, 1, u8::try_from(dcid).unwrap()];
+            pkt.extend(std::iter::repeat_n(1, dcid));
+            pkt.push(u8::try_from(scid).unwrap());
+            pkt.extend(std::iter::repeat_n(2, scid));
+            pkt.extend([0, 0]);
+            assert_eq!(
+                parse_initial_header(&pkt).err(),
+                Some(QuicError::Malformed),
+                "dcid {dcid} scid {scid}"
+            );
+        }
     }
 
     #[test]

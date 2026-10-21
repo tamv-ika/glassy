@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use gw_proto::quic::client_hello::build_client_hello;
 use gw_proto::quic::crypto_frames::crypto_frame;
 use gw_proto::quic::initial::protect_client_initial;
-use gw_proto::quic::retry::validate_token;
+use gw_proto::quic::retry::{mint_token, validate_token};
 use gw_proto::relay::{Backend, Backends, RelayConfig, RelayHandle, RetryMode, spawn, unix_now};
 use gw_proto::ticket::{KeyRing, RoutingTicket, seal, to_sni_labels, transports};
 use tokio::net::UdpSocket;
@@ -206,4 +206,76 @@ async fn duplicate_initial_same_tuple_single_flow() {
     c.send(&pkt).await.unwrap();
     assert_eq!(backend_sees(&seen, 2).await.len(), 2);
     assert_eq!(relay.stats().flows, 1);
+}
+
+/// A syntactically valid Initial header with no payload: the smallest thing a spoofer can send.
+fn bare_initial(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
+    let mut pkt = vec![0xc0, 0, 0, 0, 1, u8::try_from(dcid.len()).unwrap()];
+    pkt.extend_from_slice(dcid);
+    pkt.push(u8::try_from(scid.len()).unwrap());
+    pkt.extend_from_slice(scid);
+    pkt.extend([0, 0]); // empty token, Length 0
+    pkt
+}
+
+#[tokio::test]
+async fn short_or_illegal_initial_gets_no_retry() {
+    let (backend, seen) = echo_backend().await;
+    let relay = start_relay(backend, RetryMode::Always).await;
+    let c = client(&relay).await;
+    let cases = [
+        // Under 1200 bytes: a Retry would be larger than what the spoofer sent (RFC 9000 §14.1).
+        bare_initial(b"", b""),
+        bare_initial(&CLIENT_DCID, &[2; 20]),
+        // Full-size but with a client DCID shorter than the 8 bytes RFC 9000 §7.2 requires.
+        client_initial(&[1; 4], b"", Part::Whole),
+    ];
+    for pkt in &cases {
+        c.send(pkt).await.unwrap();
+    }
+    let mut buf = [0u8; 2048];
+    assert!(
+        timeout(Duration::from_millis(300), c.recv(&mut buf))
+            .await
+            .is_err(),
+        "relay answered an Initial it should have dropped"
+    );
+    assert_eq!(relay.stats().retries_sent, 0);
+    assert!(backend_sees(&seen, 1).await.is_empty());
+}
+
+#[tokio::test]
+async fn never_mode_drops_forged_retry_token() {
+    let (backend, seen) = echo_backend().await;
+    let relay = start_relay(backend, RetryMode::Never).await;
+    let c = client(&relay).await;
+    // Retry-type (first bit 0) but never minted by this gateway. Game servers trust such tokens
+    // from the gateway without checking them, so the gateway must not pass it on (spec §3.6).
+    let mut forged = vec![0x08];
+    forged.extend_from_slice(&CLIENT_DCID);
+    forged.extend_from_slice(&[0; 24]);
+    c.send(&client_initial(&[5; 8], &forged, Part::Whole))
+        .await
+        .unwrap();
+    assert!(backend_sees(&seen, 1).await.is_empty());
+    assert_eq!(relay.stats().flows, 0);
+    assert_eq!(relay.stats().dropped_bad_ticket, 1);
+}
+
+#[tokio::test]
+async fn never_mode_routes_gateway_minted_token() {
+    let (backend, seen) = echo_backend().await;
+    let relay = start_relay(backend, RetryMode::Never).await;
+    let c = client(&relay).await;
+    let rscid = [7u8; 8];
+    let token = mint_token(
+        &RETRY_KEY,
+        &CLIENT_DCID,
+        c.local_addr().unwrap(),
+        &rscid,
+        u64::from(unix_now()) + 60,
+    );
+    let initial = client_initial(&rscid, &token, Part::Whole);
+    c.send(&initial).await.unwrap();
+    assert_eq!(backend_sees(&seen, 1).await, vec![initial]);
 }
