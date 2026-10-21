@@ -2,4 +2,6 @@
 //!
 //! THROWAWAY: nothing outside `spikes/` may depend on this crate.
 
+pub mod ice;
+pub mod stun;
 pub mod ticket;
