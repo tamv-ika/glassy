@@ -6,6 +6,7 @@
 
 #include <rtc/rtc.hpp>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -99,6 +100,17 @@ void echo_on(const std::shared_ptr<rtc::DataChannel>& dc) {
   });
 }
 
+// RFC 8839 §5.4: ice-ufrag is 4 to 256 ice-chars (ALPHA / DIGIT / "+" / "/").
+bool valid_ice_ufrag(const std::string& ufrag) {
+  if (ufrag.size() < 4 || ufrag.size() > 256) {
+    return false;
+  }
+  return std::all_of(ufrag.begin(), ufrag.end(), [](char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           c == '+' || c == '/';
+  });
+}
+
 struct Session {
   std::shared_ptr<rtc::PeerConnection> pc;
   std::shared_ptr<rtc::DataChannel> reliable;
@@ -126,54 +138,66 @@ int main(int argc, char** argv) {
 
   rtc::IceUdpMuxListener listener(args.port);
   listener.OnUnhandledStunRequest([&](rtc::IceUdpMuxRequest req) {
-    const std::string key = req.localUfrag + ":" + req.remoteUfrag;
-    std::lock_guard lock(mu);
-    if (sessions.contains(key)) {
+    // Runs on libjuice's C thread with unauthenticated input: validate first, and never let an
+    // exception escape into C frames (CONVENTIONS §4), or one bad packet aborts the server.
+    if (!valid_ice_ufrag(req.localUfrag) || !valid_ice_ufrag(req.remoteUfrag)) {
+      std::cerr << "dropping STUN with an invalid ufrag from " << req.remoteAddress << ":"
+                << req.remotePort << "\n";
       return;
     }
-    std::cerr << "new session from " << req.remoteAddress << ":" << req.remotePort << "\n";
+    try {
+      const std::string key = req.localUfrag + ":" + req.remoteUfrag;
+      std::lock_guard lock(mu);
+      if (sessions.contains(key)) {
+        return;
+      }
+      std::cerr << "new session from " << req.remoteAddress << ":" << req.remotePort << "\n";
 
-    rtc::Configuration config;
-    config.enableIceUdpMux = true;
-    config.portRangeBegin = args.port;
-    config.portRangeEnd = args.port;
-    config.disableFingerprintVerification = true;
-    // Otherwise setRemoteDescription() answers immediately with random ICE credentials and the
-    // explicit answer below (carrying the derived ufrag/pwd) throws in signaling state "stable".
-    config.disableAutoNegotiation = true;
-    config.certificatePemFile = args.cert;
-    config.keyPemFile = args.key;
+      rtc::Configuration config;
+      config.enableIceUdpMux = true;
+      config.portRangeBegin = args.port;
+      config.portRangeEnd = args.port;
+      config.disableFingerprintVerification = true;
+      // Otherwise setRemoteDescription() answers immediately with random ICE credentials and the
+      // explicit answer below (carrying the derived ufrag/pwd) throws in signaling state "stable".
+      config.disableAutoNegotiation = true;
+      config.certificatePemFile = args.cert;
+      config.keyPemFile = args.key;
 
-    Session s;
-    s.pc = std::make_shared<rtc::PeerConnection>(config);
-    s.pc->onStateChange([key](rtc::PeerConnection::State state) {
-      std::cerr << "session " << key.substr(0, 12) << "... state " << state << "\n";
-    });
-    s.pc->setRemoteDescription(
-        rtc::Description(synthesized_offer(req.remoteUfrag), rtc::Description::Type::Offer));
-    s.pc->addRemoteCandidate(rtc::Candidate("candidate:1 1 UDP 1 " + req.remoteAddress + " " +
-                                                std::to_string(req.remotePort) + " typ host",
-                                            "0"));
+      Session s;
+      s.pc = std::make_shared<rtc::PeerConnection>(config);
+      s.pc->onStateChange([key](rtc::PeerConnection::State state) {
+        std::cerr << "session " << key.substr(0, 12) << "... state " << state << "\n";
+      });
+      s.pc->setRemoteDescription(
+          rtc::Description(synthesized_offer(req.remoteUfrag), rtc::Description::Type::Offer));
+      s.pc->addRemoteCandidate(rtc::Candidate("candidate:1 1 UDP 1 " + req.remoteAddress + " " +
+                                                  std::to_string(req.remotePort) + " typ host",
+                                              "0"));
 
-    rtc::DataChannelInit reliable_init;
-    reliable_init.negotiated = true;
-    reliable_init.id = 0;
-    s.reliable = s.pc->createDataChannel("reliable", reliable_init);
-    echo_on(s.reliable);
+      rtc::DataChannelInit reliable_init;
+      reliable_init.negotiated = true;
+      reliable_init.id = 0;
+      s.reliable = s.pc->createDataChannel("reliable", reliable_init);
+      echo_on(s.reliable);
 
-    rtc::DataChannelInit unreliable_init;
-    unreliable_init.negotiated = true;
-    unreliable_init.id = 1;
-    unreliable_init.reliability.unordered = true;
-    unreliable_init.reliability.maxRetransmits = 0;
-    s.unreliable = s.pc->createDataChannel("unreliable", unreliable_init);
-    echo_on(s.unreliable);
+      rtc::DataChannelInit unreliable_init;
+      unreliable_init.negotiated = true;
+      unreliable_init.id = 1;
+      unreliable_init.reliability.unordered = true;
+      unreliable_init.reliability.maxRetransmits = 0;
+      s.unreliable = s.pc->createDataChannel("unreliable", unreliable_init);
+      echo_on(s.unreliable);
 
-    s.pc->setLocalDescription(
-        rtc::Description::Type::Answer,
-        rtc::LocalDescriptionInit{.iceUfrag = req.localUfrag,
-                                  .icePwd = glassy::ice_pwd(args.k_gs, req.localUfrag)});
-    sessions.emplace(key, std::move(s));
+      s.pc->setLocalDescription(
+          rtc::Description::Type::Answer,
+          rtc::LocalDescriptionInit{.iceUfrag = req.localUfrag,
+                                    .icePwd = glassy::ice_pwd(args.k_gs, req.localUfrag)});
+      sessions.emplace(key, std::move(s));
+    } catch (const std::exception& e) {
+      std::cerr << "dropping STUN from " << req.remoteAddress << ":" << req.remotePort << ": "
+                << e.what() << "\n";
+    }
   });
 
   std::cout << "READY" << std::endl;
