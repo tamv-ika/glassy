@@ -13,6 +13,7 @@ Quy ước (comment tiếng Anh, test Rust bằng `cargo nextest run`, giới h�
 | `gw-proto/` | S1, S2, S4 | Gateway prototype ở userspace (Rust) |
 | `s1-wt-server/` | S1 | Server WebTransport echo (Rust, wtransport) |
 | `s2-webrtc-server/` | S2 | Server WebRTC ICE-lite (C++, libdatachannel) |
+| `s4-wt-ngtcp2/` | S4 | Server WebTransport nhận token Retry của gateway (C++, ngtcp2 + GnuTLS) |
 | `web/` | S1, S2, S4 | Test Playwright với Chromium thật |
 
 ## Chạy
@@ -27,11 +28,17 @@ cmake -S s2-webrtc-server -B s2-webrtc-server/build -DCMAKE_PREFIX_PATH=$PWD/.de
 cmake --build s2-webrtc-server/build --parallel 2
 ctest --test-dir s2-webrtc-server/build -j2 --timeout 120 --output-on-failure
 
+# S4: build ngtcp2 + nghttp3 một lần, rồi build server và test codec
+s4-wt-ngtcp2/deps.sh
+cmake -S s4-wt-ngtcp2 -B s4-wt-ngtcp2/build
+cmake --build s4-wt-ngtcp2/build --parallel 2
+ctest --test-dir s4-wt-ngtcp2/build -j2 --timeout 120 --output-on-failure
+
 # Browser tests (Chromium ở /opt/pw-browsers/chromium, hoặc đặt CHROMIUM_PATH)
 cd web && npm ci && npx playwright test
 ```
 
-Debug server S2: đặt `GLASSY_LOG=debug` để bật log debug của libdatachannel/libjuice.
+Debug server S2: đặt `GLASSY_LOG=debug` để bật log debug của libdatachannel/libjuice. Với server S4, biến này bật log của ngtcp2.
 
 ## Chạy tay trên Firefox và Safari
 
@@ -42,4 +49,4 @@ Môi trường tự động chỉ có Chromium. Trên máy có Firefox/Safari:
 3. Kết quả mong đợi: `{ufragLen: 80, reliableEcho: 'hello-reliable', unreliableEcho: 'hello-unreliable'}`.
 4. Ghi kết quả vào bảng "Chạy tay" của mục S2 trong `docs/superpowers/spikes/2026-10-21-sp0-findings.md`.
 
-S1 (WebTransport): mở `http://localhost:8080/s1.html` rồi gõ `await runS1(7102)` (thẳng) và `await runS1(4443)` (qua relay). Trình duyệt cần map `*.wt.test` về `127.0.0.1` (ví dụ dùng dnsmasq) và **không** dùng proxy HTTP.
+S1 (WebTransport): mở `http://localhost:8080/s1.html` rồi gõ `await runS1(7102)` (thẳng) và `await runS1(4443)` (qua relay). S4 dùng cùng trang này: `await runS1(7103)` (thẳng tới ngtcp2) và `await runS1(4443)` sau khi chạy `beforeAll` của `web/tests/s4.spec.ts`. Trình duyệt cần map `*.wt.test` về `127.0.0.1` (ví dụ dùng dnsmasq) và **không** dùng proxy HTTP.

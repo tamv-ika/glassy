@@ -32,3 +32,10 @@ foreach(t retry_token_test cidr_test h3_codec_test)
   target_compile_definitions(${t} PRIVATE GLASSY_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../vectors")
   gtest_discover_tests(${t})
 endforeach()
+
+# The server needs ngtcp2 from deps.sh; the codec tests above build without it.
+if(NGTCP2_FOUND)
+  add_executable(s4-wt-server src/server.cpp)
+  target_link_libraries(s4-wt-server PRIVATE glassy_s4 PkgConfig::NGTCP2 PkgConfig::GNUTLS)
+  target_compile_options(s4-wt-server PRIVATE -Wall -Wextra -Werror)
+endif()
