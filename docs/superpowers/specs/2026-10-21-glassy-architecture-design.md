@@ -19,7 +19,7 @@ Cần một gateway (tương tự Quilkin) đứng giữa người chơi và gam
 
 - Game server viết bằng **C++** để dùng chung thư viện simulator (vật lý, game simulation) với client.
 - Matchmaking dùng **Nakama**; allocate game server qua **Agones**.
-- Môi trường đầu tiên là **AWS (EKS)**. Sau đó mở rộng sang GCP và bare metal.
+- Chạy trên **Kubernetes bất kỳ** có Agones (k8s tự dựng, k3s, EKS, GKE…), trên **AWS, GCP và bare metal**. Trước mắt là **k8s/k3s tự host trên EC2** (không dùng EKS, để tiết kiệm chi phí).
 
 ### 0.2 Mục tiêu hiệu năng (mỗi node gateway)
 
@@ -59,7 +59,7 @@ Cần một gateway (tương tự Quilkin) đứng giữa người chơi và gam
 | D5 | **Gateway và control plane viết bằng Rust**; **core và SDK viết bằng C++**; wire format chốt bằng **spec + golden test vectors** (không dùng FFI) | parser ở edge được memory-safe; Defold extender tự biên dịch C++; console vẫn khả thi; phần parse dùng chung giữa gateway và SDK rất nhỏ |
 | D6 | **Routing ticket nằm trong gói mở đầu, sau đó route bằng flow 5-tuple** (khác Quilkin, vốn gắn token vào mọi gói) | browser không thể gắn byte vào gói DTLS/QUIC; ticket có AEAD và hạn dùng; không có race với control plane |
 | D7 | Vị trí ticket theo transport: native → gói `CONNECT`; WebRTC → **server ICE ufrag**; WebTransport → **SNI** (fallback: mỗi game server một port) | chỉ dùng những chỗ protocol cho phép gắn dữ liệu |
-| D8 | WebTransport: **gateway làm QUIC Retry offload** ở mode no-shared-state (draft-ietf-quic-retry-offload) | chặn Initial giả IP ở edge; game server không cần key Retry, vì gateway nằm trên mọi đường vào game server |
+| D8 | WebTransport: **gateway làm QUIC Retry offload** ở mode **shared-state** (draft-ietf-quic-retry-offload) | chặn Initial giả IP ở edge; game server tự kiểm token bằng key dùng chung, nên an toàn không phụ thuộc firewall có được cấu hình đúng hay không |
 | D9 | **Không học lại flow**; khi client đổi IP/port thì **reconnect tường minh** bằng ticket cũ, và game server **resume** session theo `session_id` | ít logic; gói data từ địa chỉ lạ bị XDP drop, nên chống DDoS tốt hơn |
 | D10 | **`server_id` = UID của GameServer** (16 byte) | không cần bộ cấp ID, không cần leader |
 | D11 | Gateway lấy cấu hình qua trait **`Provider`**; MVP chỉ có **`K8sProvider`** watch trực tiếp `GameServer` và `Secret` | không cần xDS hay distributor ở MVP; sau này mở rộng sang xDS hoặc gossip mà không phải đổi data plane |
@@ -68,6 +68,7 @@ Cần một gateway (tương tự Quilkin) đứng giữa người chơi và gam
 | D14 | Gateway → game server dùng **SNAT, mỗi flow một upstream port** | game server nhận UDP chuẩn, nên `libdatachannel` và `ngtcp2` chạy nguyên bản |
 | D15 | Server SDK: WebRTC dùng **libdatachannel**; WebTransport dùng **ngtcp2 + lớp HTTP/3 + WT tự viết**; TLS mặc định là **GnuTLS** dùng chung cho QUIC và DTLS | ngtcp2 cho app kiểm soát token Retry (bắt buộc với D8); tự chủ theo kịp phiên bản draft WT của browser |
 | D16 | 4 data plane mode **K / X / XA / A**, chọn bằng capability detector; **XA là mặc định trên AWS** nếu máy cho phép | XDP xử lý fast path ngay trong kernel; AF_XDP xử lý slow path khi bị flood; A tương đương Quilkin để benchmark |
+| D17 | **Portable mặc định:** chỉ dựa vào những gì cluster k8s nào cũng có. Gateway gửi tới **`nodeIP:hostPort`** (Agones `portPolicy: Dynamic`); gateway là DaemonSet `hostNetwork` trên node có IP public; không dùng LoadBalancer của cloud. Gửi thẳng tới pod IP chỉ là tối ưu tuỳ chọn | chạy được trên k8s/k3s/EKS/GKE và AWS/GCP/bare metal mà không phải sửa code; khác biệt giữa các môi trường chỉ nằm ở capability detector và cấu hình |
 
 ---
 
@@ -92,10 +93,10 @@ Cần một gateway (tương tự Quilkin) đứng giữa người chơi và gam
 
 | Thành phần | Ngôn ngữ | Biết gì | Không biết gì |
 |---|---|---|---|
-| `glassy-gateway` | Rust + eBPF (aya) | `K_gw`, bảng GS, key Retry của riêng gateway | session key, payload game |
+| `glassy-gateway` | Rust + eBPF (aya) | `K_gw`, `K_retry`, bảng GS | session key, payload game |
 | `glassy-control` (broker) | Rust | `K_gw`, `K_gs`, Agones API | traffic game |
 | `glassy-nakama` | Go | gRPC client gọi broker | format ticket, crypto |
-| `glassy-sdk-server` | C++ | `K_gs` của fleet, session key, cert DTLS và WT | `K_gw` |
+| `glassy-sdk-server` | C++ | `K_gs` của fleet, `K_retry`, session key, cert DTLS và WT | `K_gw` |
 | `glassy-sdk-client` | C++ (+ JS glue cho HTML5) | session key của chính nó | mọi key hệ thống |
 | `glassy-proto` | spec + golden vectors; implement bằng Rust (gateway, broker) và C++ (SDK) | là hợp đồng chung | — |
 
@@ -139,7 +140,7 @@ Mỗi sub-project đi qua một vòng spec → plan → implement riêng.
 |---|---|---|---|
 | `K_gw` | broker, gateway | mã hoá routing ticket bằng **AES-128-GCM** | key ring có `key_id` 1 byte; gateway chấp nhận key hiện tại và key trước đó |
 | `K_gs[fleet]` | broker, game server của fleet đó (k8s Secret mount vào pod) | mã hoá server ticket bằng **ChaCha20-Poly1305 (RFC 8439)**; dẫn xuất ICE pwd | có `key_id`; server SDK đọc lại file khi Secret thay đổi |
-| `K_retry_gw` | **chỉ gateway** | xác thực phần opaque của token Retry | gateway tự sinh và tự xoay |
+| `K_retry` | gateway, mọi game server (Secret riêng, mount vào pod) | mã hoá token Retry theo format **shared-state** của draft retry-offload | key sequence theo draft; chấp nhận key hiện tại và trước đó |
 | Session key `c2s` / `s2c` | client, game server | mã hoá E2E cho native UDP | mỗi session một cặp, broker sinh ngẫu nhiên 32 byte |
 | Cert DTLS | game server tự sinh | fingerprint SHA-256 trong SDP | sinh khi khởi động |
 | Cert WT (ECDSA P-256, hạn ≤ 14 ngày) | game server tự sinh | `serverCertificateHashes` | game server sống quá ~13 ngày thì tự sinh lại và cập nhật annotation |
@@ -232,22 +233,22 @@ DATA: route theo 5-tuple trong fast path, không cần giải mã gì
 new WebTransport("https://<b32-ticket-1>.<b32-ticket-2>.wt.<domain>/glassy?t=<server_ticket>",
                  { serverCertificateHashes: [{ algorithm: "sha-256", value: H }] })
 ```
-- DNS: wildcard `*.wt.<domain>` (Route53) → các EIP của gateway.
+- DNS: wildcard `*.wt.<domain>` (nhà cung cấp DNS bất kỳ, §5.5) → IP public của các gateway.
 - Channel `unreliable` → datagram; channel `reliable` → một bidi stream, mỗi message có prefix độ dài.
 
 **Gateway (slow path):**
 ```
-Initial #1 (token rỗng)  → gửi Retry: SCID = RSCID ngẫu nhiên; token no-shared-state =
-                            bit đầu 0 | ODCIL | ODCID (cleartext) | opaque = AEAD_K_retry_gw(client ip, port, timestamp, RSCID)
+Initial #1 (token rỗng)  → gửi Retry: SCID = RSCID ngẫu nhiên; token theo format shared-state,
+                            mã hoá bằng K_retry (chứa ODCID, timestamp; IP/port client và RSCID nằm trong pseudoheader)
                             (chưa parse SNI, nên chi phí rất thấp)
-Initial #2.. (có token)  → kiểm opaque → giải mã Initial (key dẫn xuất từ DCID theo RFC 9001 §5.2)
+Initial #2.. (có token)  → kiểm token → giải mã Initial (key dẫn xuất từ DCID theo RFC 9001 §5.2)
                           → gom các frame CRYPTO (tối đa 2 gói hoặc 100ms; xử lý được thứ tự bị xáo
                             do "chaos protection" của Chrome và ClientHello có key share ML-KEM dài)
                           → đọc SNI → bỏ phần đuôi domain → base32 decode → kiểm routing ticket
                           → tạo flow → forward các gói đã buffer (giữ nguyên token) tới port WT của game server
 ```
 - **Retry mặc định luôn bật** (cấu hình `always` / `never`). Không làm chế độ bật tự động theo tải, để tránh "transition mode".
-- **Game server (ngtcp2):** token có bit đầu = 0 → **không kiểm**, coi như địa chỉ đã được xác thực, đặt `retry_source_connection_id` = DCID của gói, `original_destination_connection_id` = ODCID lấy từ token. Mode no-shared-state đúng điều kiện vì security group chỉ cho phép gateway gửi tới game server.
+- **Game server (ngtcp2):** kiểm token bằng `K_retry` theo mục "Server Requirements" của format shared-state. Nếu hợp lệ: coi như địa chỉ đã được xác thực, đặt `retry_source_connection_id` = DCID của gói, `original_destination_connection_id` = ODCID trong token. Vì game server tự kiểm token, độ an toàn không phụ thuộc vào firewall (vẫn khuyến nghị chỉ cho gateway gửi tới game server, xem §5.5).
 - **Fallback** nếu spike S1 thất bại: mỗi game server một port trên gateway. Broker cấp port, gateway route theo dst port. Không cần SNI, nhưng phải có pool port và bảng map.
 
 ### 3.7 Reconnect và vòng đời flow
@@ -271,6 +272,7 @@ Initial #2.. (có token)  → kiểm opaque → giải mã Initial (key dẫn xu
 | `K_gs` của một fleet | giả server ticket trong fleet đó | đụng tới fleet khác |
 | Một game server | đọc các session của chính nó | đụng tới game server khác |
 | Ticket native bị sniff | tạo flow chưa xác nhận (≤ 2 flow, 5s) | gửi gói hợp lệ, resume session (thiếu session key cho proof) |
+| `K_retry` (ví dụ lộ từ một game server bị chiếm) | bỏ qua bước xác thực địa chỉ của QUIC | xác thực như player, đọc traffic |
 
 ---
 
@@ -374,8 +376,8 @@ trait Provider {
 | Trường | Nguồn |
 |---|---|
 | `server_id` | `metadata.uid` của GameServer |
-| địa chỉ | **pod IP** (VPC CNI cho pod IP route được trong VPC); có tuỳ chọn fallback sang `nodeIP:hostPort` |
-| port theo transport | các port đặt tên `glassy-udp`, `glassy-webrtc`, `glassy-wt` trong spec của GameServer |
+| địa chỉ | mặc định **`nodeIP:hostPort`** (Agones `portPolicy: Dynamic`): chạy trên mọi CNI và mọi môi trường. Tuỳ chọn `addressMode: podIP` khi CNI cho pod IP route được trên mạng vật lý (EKS VPC CNI, GKE VPC-native, Cilium native routing, Calico không encap). Với overlay như flannel VXLAN (mặc định của k3s), XDP không gửi thẳng tới pod IP được |
+| port theo transport | các port đặt tên `glassy-udp`, `glassy-webrtc`, `glassy-wt` trong spec của GameServer; hostPort tương ứng lấy từ `status.ports` |
 | trạng thái | **route được khi `Ready`, `Reserved` hoặc `Allocated`**; bị xoá khi `Shutdown`, `Unhealthy` hoặc khi object bị xoá |
 
 - Game server có mặt trong bảng **từ lúc `Ready`**, tức trước khi được allocate. Race gần như không xảy ra; nếu có thì client tự gửi lại (`CONNECT` retry, browser tự retransmit STUN và Initial).
@@ -418,14 +420,26 @@ ConnectInfo {
 - ConnectInfo của từng player đi theo kết quả callback; code runtime Nakama của game gửi nó cho đúng client qua notification hoặc phản hồi RPC.
 - **Cần kiểm chứng ở SP2 (spike S5):** type chính xác của `FleetManager` (`InstanceInfo`, `JoinInfo`, `SessionInfo`, callback của `Create`) và chỗ đặt ConnectInfo. Go plugin phải build đúng phiên bản Go và dependency của Nakama.
 
-### 5.5 Triển khai trên AWS (EKS)
+### 5.5 Triển khai (portable)
 
-- **Node group gateway:** c7gn (Graviton) hoặc c6in (x86), đặt trong public subnet, **mỗi node một EIP**, taint `glassy.dev/gateway`. Gateway chạy dạng DaemonSet với `hostNetwork`, cần `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` và mount `/sys/fs/bpf`.
-- **Node group game server:** private subnet; Agones với `portPolicy` không dùng hostPort (route thẳng tới pod IP; cần kiểm phiên bản Agones có hỗ trợ).
-- **Security group:**
-  - gateway: inbound UDP 443 từ `0.0.0.0/0`; outbound tới SG của game server.
-  - game server: **inbound UDP chỉ từ SG của gateway**, trên các port glassy. Đây là điều kiện để dùng Retry no-shared-state.
-- **DNS:** hosted zone Route53 chứa wildcard `*.wt.<domain>` trỏ về các EIP gateway.
+**Yêu cầu chung, giống nhau ở mọi môi trường:**
+- Một cluster Kubernetes bất kỳ (k8s tự dựng, k3s, EKS, GKE…) có Agones.
+- **Node gateway:** gắn label và taint `glassy.dev/gateway`, có **IP public**. Gateway chạy dạng DaemonSet với `hostNetwork`, cần `CAP_BPF`, `CAP_NET_ADMIN`, `CAP_SYS_ADMIN` và mount `/sys/fs/bpf`. Không dùng Service kiểu LoadBalancer.
+- **Node game server:** Agones `portPolicy: Dynamic`, mỗi GameServer có 3 port (một cho mỗi transport).
+- **Firewall (khuyến nghị):** gateway nhận UDP 443 từ internet; node game server chỉ nhận các port glassy từ IP của gateway.
+- **DNS:** một nhà cung cấp DNS bất kỳ có bản ghi wildcard (Route53, Cloud DNS, Cloudflare…) cho `*.wt.<domain>` trỏ về IP các gateway.
+
+**Khác biệt theo môi trường (chỉ nằm ở cấu hình và capability detector):**
+
+| | AWS (k8s/k3s tự host trên EC2, hoặc EKS) | GCP (tự host trên GCE, hoặc GKE) | Bare metal |
+|---|---|---|---|
+| IP public của gateway | Elastic IP gắn vào node | external IP tĩnh | IP public của server |
+| NIC / driver | ENA | gVNIC (hoặc virtio) | mlx5, ice, i40e… |
+| Firewall | security group | VPC firewall rule | nftables trên host |
+| Instance gợi ý cho gateway | c7gn (Graviton), c6in (x86) | C3 / C4 có Tier_1 networking | NIC Intel/Mellanox 10–25G |
+| `addressMode: podIP` dùng được khi | EKS + VPC CNI | GKE VPC-native | CNI route được (Cilium, Calico) |
+
+Trước mắt: **k8s/k3s tự host trên EC2**, mặc định `addressMode: hostPort`.
 
 ---
 
@@ -473,10 +487,10 @@ hết GRACE → on_disconnect
 |---|---|
 | Native UDP | `glassy-proto` (C++) |
 | WebRTC | `libdatachannel`: ICE-lite, mux trên một port, tạo PeerConnection khi nhận STUN lạ, ICE pwd dẫn xuất từ `K_gs` (§3.5) |
-| WebTransport | `ngtcp2` + **lớp HTTP/3 + WT tối giản tự viết**: SETTINGS (hỗ trợ nhiều phiên bản draft), decode QPACK chỉ với bảng tĩnh và literal (dung lượng bảng động = 0), extended CONNECT, stream WT (bidi `0x41`, uni `0x54`), datagram có prefix quarter stream ID, capsule `CLOSE` / `DRAIN`; xử lý token Retry no-shared-state. Ước lượng 1.5k–3k dòng. Code tham khảo: lsquic và `h3zero` của picoquic (đều MIT). |
+| WebTransport | `ngtcp2` + **lớp HTTP/3 + WT tối giản tự viết**: SETTINGS (hỗ trợ nhiều phiên bản draft), decode QPACK chỉ với bảng tĩnh và literal (dung lượng bảng động = 0), extended CONNECT, stream WT (bidi `0x41`, uni `0x54`), datagram có prefix quarter stream ID, capsule `CLOSE` / `DRAIN`; kiểm token Retry shared-state bằng `K_retry`. Ước lượng 1.5k–3k dòng. Code tham khảo: lsquic và `h3zero` của picoquic (đều MIT). |
 | TLS | **GnuTLS** cho cả ngtcp2 (QUIC) và libdatachannel (DTLS): một thư viện, cả hai bên đều hỗ trợ chính thức. Phương án thay thế: aws-lc (QUIC) + Mbed TLS (DTLS), cân nhắc theo kết quả benchmark |
 | Agones | **REST API của sidecar Agones** (`/ready`, `/health`, `/metadata/annotation`, `/watch/gameserver`); không dùng gRPC |
-| Khởi động | đọc `K_gs` → sinh cert DTLS và cert WT → ghi annotation `glassy.dev/dtls-fp`, `glassy.dev/wt-cert-sha256` → `Ready()` |
+| Khởi động | đọc `K_gs` và `K_retry` → sinh cert DTLS và cert WT → ghi annotation `glassy.dev/dtls-fp`, `glassy.dev/wt-cert-sha256` → `Ready()` |
 | Tắt | gửi `DISCONNECT` hoặc đóng kết nối đúng chuẩn cho mọi session → `Shutdown()` |
 
 ### 6.6 Client SDK
@@ -527,6 +541,23 @@ Bắt event đổi mạng của từng hệ điều hành (Android `Connectivity
 
 ## 9. Testing
 
+### 9.1 Các tầng môi trường test
+
+Phần lớn việc test **không cần cloud**. Chỉ tầng 3 cần AWS, và chỉ trong thời gian ngắn.
+
+| Tầng | Chạy ở đâu | Test được gì | Cần chuẩn bị |
+|---|---|---|---|
+| 0. CI | GitHub Actions | unit, fuzz, golden vectors, eBPF qua `BPF_PROG_TEST_RUN`, verifier trên nhiều kernel | không |
+| 1. Máy Linux bất kỳ (dev hoặc VM) | network namespace + **veth** (XDP driver mode, AF_XDP copy mode), k3s/k3d + Agones, Chromium/Firefox thật qua Playwright | **toàn bộ chức năng**: 3 transport, Mode K/X/XA/A, reconnect, chaos | không |
+| 2. Bare metal có NIC thật | 2 máy (hoặc 1 máy NIC 2 cổng) với NIC Intel (i40e/ice) hoặc Mellanox (mlx5); máy ở văn phòng hoặc thuê dedicated theo tháng | **benchmark chính, so với Quilkin** (so sánh tương đối, phần cứng nào cũng có giá trị) | 2 máy |
+| 3. Kiểm chứng trên cloud | AWS: 2–3 instance EC2 trong ~1–2 giờ, chạy script dựng sẵn (có thể chạy từ AWS CloudShell). GCP để tới SP7 | chỉ những gì riêng của NIC cloud (ENA, gVNIC): giới hạn XDP, queue, zero-copy, pps tuyệt đối | một tài khoản AWS có quyền chạy EC2 |
+
+DNS wildcard cho WebTransport khi test không cần Route53:
+- **Local:** Chromium chạy với `--host-resolver-rules="MAP *.wt.test 127.0.0.1"`, hoặc dùng dnsmasq làm wildcard.
+- **Từ xa:** hostname dạng `<ticket>.<ip>.sslip.io` tự resolve về IP nằm trong tên.
+
+### 9.2 Test theo lớp
+
 | Lớp | Cách test |
 |---|---|
 | `glassy-proto` | golden vectors chạy chung cho Rust, C++ và eBPF (`BPF_PROG_TEST_RUN`); differential fuzzing Rust ↔ C++ |
@@ -541,7 +572,9 @@ Bắt event đổi mạng của từng hệ điều hành (Android `Connectivity
 
 ## 10. Benchmark so với Quilkin
 
-- **Môi trường:** AWS, cùng một AZ, placement group dạng cluster. Gateway chạy trên **c7gn** và **c6in**. Máy sinh traffic và máy echo (đóng vai game server) tách riêng.
+- **Môi trường:**
+  - **Benchmark chính ở tầng 2** (bare metal, NIC Intel/Mellanox): gateway, máy sinh traffic và máy echo (đóng vai game server) tách riêng.
+  - **Kiểm chứng ở tầng 3** trên AWS: một lượt ngắn trên **c7gn** và **c6in**, cùng một AZ, placement group dạng cluster, để có số tuyệt đối trên ENA.
 - **Các cặp so sánh** (Quilkin pin một phiên bản cụ thể, cấu hình `Capture` suffix + `TokenRouter`):
 
 | Quilkin | glassy |
@@ -564,37 +597,33 @@ Bắt event đổi mạng của từng hệ điều hành (Android `Connectivity
 |---|---|---|---|
 | S1 | WT với ticket trong SNI: Chrome, Firefox, Safari có chấp nhận URL dạng hostname dài kèm `serverCertificateHashes` mà **không kiểm tên trong cert** không? Gateway có parse được ClientHello trải nhiều gói (ML-KEM, chaos protection) không? | browser kết nối thành công qua một prototype gateway | port mapping cho mỗi game server (§3.6) |
 | S2 | WebRTC không signaling: browser có chấp nhận SDP answer tự dựng (`ice-lite`, ufrag ~80 ký tự, data channel `negotiated`) không? libdatachannel có: mux listener kèm callback khi gặp STUN lạ, cho đặt ufrag/pwd local, cho tắt kiểm fingerprint không? | browser ↔ server prototype trao đổi được data | (a) ticket ngắn hơn (chỉ số tra bảng); (b) signaling relay qua Nakama |
-| S3 | ENA trên c7gn và c6in (AL2023, kernel 6.12): XDP driver mode, `XDP_TX`, ràng buộc queue và MTU, AF_XDP zero-copy, pps của một reflector `XDP_TX` | có bảng capability và pps nền | detector chọn mode thấp hơn; điều chỉnh mục tiêu §0.2 |
-| S4 | Chrome, Firefox, Safari hiện dùng phiên bản draft WT nào (SETTINGS, loại stream)? ngtcp2 + GnuTLS có hoàn tất handshake khi nhận token Retry no-shared-state do gateway phát không? | handshake + datagram + bidi stream chạy được với Chrome và Firefox | lớp WT hỗ trợ nhiều draft; nếu cần, xem lại lsquic |
+| S3 | ENA trên c7gn và c6in (Amazon Linux 2023, kernel 6.12), chạy ở tầng 3 trong ~1–2 giờ: XDP driver mode, `XDP_TX`, ràng buộc queue và MTU, AF_XDP zero-copy, pps của một reflector `XDP_TX` | có bảng capability và pps nền | detector chọn mode thấp hơn; điều chỉnh mục tiêu §0.2 |
+| S4 | Chrome, Firefox, Safari hiện dùng phiên bản draft WT nào (SETTINGS, loại stream)? ngtcp2 + GnuTLS có hoàn tất handshake khi nhận token Retry shared-state do gateway phát không? | handshake + datagram + bidi stream chạy được với Chrome và Firefox | lớp WT hỗ trợ nhiều draft; nếu cần, xem lại lsquic |
 | S5 | Type chính xác của `FleetManager` trong Nakama và chỗ đặt ConnectInfo cho từng user | prototype module Go gọi được broker giả lập | dùng hook `MatchmakerMatched` + RPC |
 
 ---
 
-## 12. Môi trường AWS cần cho test
+## 12. Những gì cần chuẩn bị cho test
 
-Chỉ cần khi tới S3, SP3 và benchmark; spec và SP1/SP2 có thể làm trước.
+Tầng 0 và 1 (§9.1) không cần chuẩn bị gì; spec, SP1 và SP2 làm được hoàn toàn trên CI và máy Linux.
 
-**Thông tin và quyết định cần từ phía bạn:**
-1. **Tài khoản AWS sandbox riêng** (tách khỏi production), có **budget alert**.
-2. **Region và AZ** (ví dụ `ap-southeast-1` nếu người chơi ở Đông Nam Á), phải có sẵn c7gn và c6in.
-3. **Quota EC2:** đủ vCPU on-demand cho khoảng 4–6 instance dòng C (8–16 vCPU mỗi instance), và quota EIP.
-4. **EKS:** dùng một cluster sẵn có (phiên bản EKS, Agones, có VPC CNI không) hay tạo cluster test riêng bằng IaC.
-5. **AMI và kernel:** đề xuất Amazon Linux 2023 với kernel 6.12.
-6. **Domain:** một hosted zone Route53 cho `*.wt.<domain>` (dùng cho S1 và SP5).
-7. **Phiên bản Nakama và Go** đang dùng (để build Go plugin tương thích).
+**Tầng 2 (benchmark chính):** 2 máy bare metal có NIC Intel (i40e/ice) hoặc Mellanox (mlx5), nối trực tiếp hoặc qua switch. Máy văn phòng hay thuê dedicated đều được.
 
-**Cách cấp quyền truy cập (không bao giờ dán key vào chat):**
-- **Khuyến nghị:** GitHub Actions dùng **OIDC role** trong tài khoản sandbox (không có key dài hạn). Workflow chạy IaC + benchmark, rồi upload kết quả làm artifact.
-- **Hoặc:** đặt credential của một IAM role có phạm vi hẹp vào **phần cài đặt môi trường cloud** của session (environment secrets). Đồng thời cho phép truy cập mạng tới domain API của AWS (`*.amazonaws.com`). Khi đó Claude chạy được IaC và CLI trực tiếp từ session.
-- **Hoặc:** bạn tự chạy script trong `bench/` rồi gửi lại file kết quả.
-- **Quyền IAM tối thiểu:** EC2 (chạy và huỷ instance có tag `glassy-bench`), VPC, placement group, EIP, EKS (nếu tạo cluster), Route53 (hosted zone test), CloudWatch Logs. Giới hạn bằng permission boundary và điều kiện theo tag.
+**Tầng 3 (AWS, một lượt ngắn cho S3 và để có số tuyệt đối):**
+1. Một tài khoản AWS có quyền chạy và huỷ EC2 trong một region (ví dụ `ap-southeast-1`), có budget alert.
+2. Quota đủ cho 2–3 instance c7gn/c6in cỡ `.2xlarge`.
+3. Bạn tự chạy script dựng sẵn trong `bench/aws/` (dựng instance → đo → **tự huỷ hạ tầng**), có thể chạy từ AWS CloudShell, rồi gửi lại file kết quả. **Không cần** EKS, Route53 hay OIDC.
+
+**Tích hợp Nakama (SP2):** phiên bản Nakama và Go đang dùng, để build Go plugin cho khớp.
+
+Không bao giờ dán key hay credential vào chat. Nếu sau này muốn Claude chạy trực tiếp từ session, credential được đặt trong phần cài đặt môi trường cloud của session.
 
 ---
 
 ## 13. Các điểm còn mở cần kiểm chứng
 
 - Type `FleetManager` của Nakama (S5).
-- Agones: phiên bản hỗ trợ `portPolicy` không dùng hostPort; trường pod IP trong `status.addresses`.
+- Agones: phiên bản tối thiểu cần hỗ trợ; một GameServer có 3 port `Dynamic`; với `addressMode: podIP`, lấy pod IP từ `status.addresses`.
 - libdatachannel: các API cho WebRTC không signaling (S2).
 - Phiên bản draft WT của browser (S4).
 - Ràng buộc XDP và AF_XDP của ENA trên các instance mục tiêu (S3).
