@@ -1,0 +1,11 @@
+{
+  "name": "glassy-spikes-web",
+  "private": true,
+  "description": "Browser tests for the SP0 spikes (throwaway)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  }
+}

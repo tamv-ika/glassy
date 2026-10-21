@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <iostream>
 #include <map>
@@ -61,9 +62,11 @@ Args parse_args(int argc, char** argv) {
   return a;
 }
 
-// The browser's real offer never reaches us, so this stand-in only needs to carry the client's
-// ufrag. The DTLS fingerprint is a placeholder because fingerprint verification is disabled;
-// clients authenticate later with the server ticket on the reliable channel.
+// The browser's real offer never reaches us, so this stand-in carries only the client's ICE
+// credentials. Clients munge their offer so that ice-pwd == ice-ufrag (the libp2p WebRTC-Direct
+// convention); libjuice is a full ICE agent and its own checks need the client's password. The
+// DTLS fingerprint is a placeholder because fingerprint verification is disabled; clients
+// authenticate later with the server ticket on the reliable channel.
 std::string synthesized_offer(const std::string& remote_ufrag) {
   return "v=0\r\n"
          "o=- 0 0 IN IP4 0.0.0.0\r\n"
@@ -76,7 +79,9 @@ std::string synthesized_offer(const std::string& remote_ufrag) {
          "a=ice-ufrag:" +
          remote_ufrag +
          "\r\n"
-         "a=ice-pwd:glassyremotepwdunused00\r\n"
+         "a=ice-pwd:" +
+         remote_ufrag +
+         "\r\n"
          "a=fingerprint:sha-256 "
          "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:"
          "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\n"
@@ -111,7 +116,10 @@ int main(int argc, char** argv) {
               << ")\n";
     return 2;
   }
-  rtc::InitLogger(rtc::LogLevel::Warning);
+  // GLASSY_LOG=debug turns on libdatachannel/libjuice debug logs for spike investigations.
+  const char* log_env = std::getenv("GLASSY_LOG");
+  rtc::InitLogger(log_env && std::string(log_env) == "debug" ? rtc::LogLevel::Debug
+                                                             : rtc::LogLevel::Warning);
 
   std::mutex mu;
   std::map<std::string, Session> sessions;  // keyed by "<server ufrag>:<client ufrag>"
@@ -130,6 +138,9 @@ int main(int argc, char** argv) {
     config.portRangeBegin = args.port;
     config.portRangeEnd = args.port;
     config.disableFingerprintVerification = true;
+    // Otherwise setRemoteDescription() answers immediately with random ICE credentials and the
+    // explicit answer below (carrying the derived ufrag/pwd) throws in signaling state "stable".
+    config.disableAutoNegotiation = true;
     config.certificatePemFile = args.cert;
     config.keyPemFile = args.key;
 
