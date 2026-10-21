@@ -173,4 +173,36 @@ _Chưa chạy. Người dùng chạy theo `bench/aws/` (Task 14)._
 
 ## S5 — Interface `FleetManager` của Nakama
 
-_Chưa chạy._
+**Câu hỏi:** Type chính xác của `FleetManager` trong Nakama v3.41.0 (nakama-common v1.48.0) là gì? ConnectInfo của từng player nên đặt ở đâu? Giá trị trả về của `Create` được dùng thế nào? Plugin Go có build và load được không?
+
+**Bằng chứng:**
+- `cd spikes/s5-nakama && go test -p 2 -race ./...` → **9 test pass**:
+  - callback trả ConnectInfo cho từng user;
+  - broker lỗi thì callback nhận `CreateError`;
+  - `Create` vẫn hoàn tất khi context của caller đã bị huỷ;
+  - gọi `Create` trước `Init` thì báo lỗi;
+  - `Join` trả về `SessionInfo`;
+  - `Join` vào instance không tồn tại thì báo lỗi;
+  - `Get` ánh xạ đúng các field;
+  - mã hoá ConnectInfo an toàn cho URL;
+  - decode từ chối dữ liệu rác.
+- `CGO_ENABLED=1 go build -buildmode=plugin -trimpath -o glassy-fm.so .` (go1.27.1) → plugin 20MB.
+- `go run -trimpath ./cmd/loadcheck glassy-fm.so` → `OK: InitModule registered *main.GlassyFleetManager`. Chương trình này load plugin đúng như Nakama: `plugin.Open`, `Lookup("InitModule")`, rồi ép kiểu về `func(context.Context, runtime.Logger, *sql.DB, runtime.NakamaModule, runtime.Initializer) error`.
+- Khi build host **không** có `-trimpath`: `plugin was built with a different version of package internal/goarch`.
+- Đọc source Nakama v3.41.0: `server/runtime_go.go` (`RegisterFleetManagerByName` gọi `Init(ri.nk, ri.fmCallbackHandler)`), `server/fleet_manager_callback_handler.go`, `build/Dockerfile`.
+
+**Kết luận: ĐẠT.** Có một chỗ khác với spec/plan:
+- **`Init` có chữ ký `Init(nk runtime.NakamaModule, callbackHandler runtime.FmCallbackHandler) error`**, không phải 4 tham số như ghi trong plan. `FleetManagerInitializer` gồm: `Get`, `List`, `Create`, `Join` (của `FleetManager`), cộng thêm `Init`, `Update`, `Delete`.
+- **ConnectInfo đi trong `SessionInfo.SessionId`:** mỗi user một `SessionInfo{UserId, SessionId}`, theo đúng thứ tự `userIds`. `SessionId` = base64url không padding của JSON ConnectInfo, dài khoảng 1–1.5KB với ConnectInfo đầy đủ. Không dùng `InstanceInfo.ConnectionInfo` (chỉ có một địa chỉ chung cho cả instance, trong khi mỗi player cần ticket riêng); field này chỉ chứa địa chỉ game server để tham khảo.
+- **Giá trị trả về của `Create` (`map[string]string`):** core Nakama **không bao giờ gọi `Create`**. Chỉ code runtime của game gọi nó, qua `nk.GetFleetManager().Create(...)` trong hook `MatchmakerMatched` hoặc trong RPC. Map vì vậy chỉ quay về chính code đó. Glassy trả `nil`.
+- **Callback đi qua registry của Nakama:** `GenerateCallbackId` → `SetCallback` → `InvokeCallback`. `LocalFmCallbackHandler` là một `sync.Map` **cục bộ trên từng node** (UUIDv1 gắn hash của node), nên callback phải được invoke trên chính node đã gọi `Create`. Prototype làm việc này bằng một goroutine trong cùng process.
+- **Context:** Nakama huỷ context của RPC/hook ngay khi hàm trả về, nên phần allocate phải tách ra bằng `context.WithoutCancel` và đặt timeout riêng (30s, quá hạn thì báo `CreateTimeout`).
+- **Bẫy khi encode JSON:** `json.Marshal` escape `<`, `>`, `&` thành `<`… **ngay cả bên trong `json.RawMessage`**, làm đổi byte các phần opaque do broker tạo (test round-trip phát hiện ra). Phải dùng `Encoder.SetEscapeHTML(false)`.
+- **Ràng buộc khi build plugin:** phải trùng **chính xác** Go 1.27.1, nakama-common v1.48.0, protobuf v1.36.12, và cờ build của Nakama (`-trimpath`, `-gcflags/-asmflags "-trimpath $PWD"`, `-mod=vendor`). Chỉ cần lệch một chút là plugin không load được. Cách chắc ăn là build bằng image `heroiclabs/nakama-pluginbuilder:3.41.0`.
+- `Update` được để no-op, vì số player lấy từ Agones và broker đọc ở đó. `latencies` bị bỏ qua, vì SP0 chỉ có một region.
+
+**Việc cho sub-project sau:**
+- **SP2:** chạy plugin trong Nakama thật (cần CockroachDB/Postgres, ví dụ dùng `docker-compose`), với broker gRPC + mTLS. Viết ví dụ hook `MatchmakerMatched` gọi `Create` rồi gửi `SessionId` cho từng user qua notification. Build plugin bằng pluginbuilder trong CI.
+- **SP2:** nếu sau này kết quả allocate về theo dạng bất đồng bộ (webhook) thay vì goroutine, phải route nó về đúng node đã gọi `Create`, vì callback registry là cục bộ.
+- **SP4:** client SDK decode `SessionId` (base64url → JSON ConnectInfo).
+- **Cập nhật spec §5.4:** chữ ký `Init`, `Create` trả `nil`, ConnectInfo nằm trong `SessionInfo.SessionId`, `Update` no-op.
