@@ -41,9 +41,10 @@ SHIM
 chmod +x "$SHIMS"/*
 export PATH="$SHIMS:$PATH"
 
-# Prints the script's exit code. CALLS is truncated here, not in the caller's subshell.
+# Prints the script's exit code. CALLS and results are reset here, not in the caller's subshell.
 run_case() {
   : >"$CALLS"
+  rm -f "$RESULTS_DIR"/*.json
   FAIL_AT=$1 AWS_REGION=ap-southeast-1 ../s3-ena-probe.sh --types c7gn.2xlarge >/dev/null 2>&1 \
     && echo 0 || echo $?
 }
@@ -68,5 +69,14 @@ ls "$RESULTS_DIR"/c7gn.2xlarge-*.json >/dev/null || { echo "FAIL: no results fil
 rc=$(run_case run-probe)
 [[ $rc != 0 ]] || { echo "FAIL (failure case): exit 0 after a failed step"; exit 1; }
 expect_teardown "failure case"
+
+# A failure while measuring throughput must not lose the capability probe already paid for.
+rc=$(run_case "run-probe.sh measure")
+[[ $rc != 0 ]] || { echo "FAIL (measure case): exit 0 after a failed measurement"; exit 1; }
+expect_teardown "measure case"
+result=$(compgen -G "$RESULTS_DIR/c7gn.2xlarge-*.json" | head -1 || true)
+[[ -n $result ]] || { echo "FAIL (measure case): no results file"; exit 1; }
+jq -e '.probe != null and (.errors | length) > 0' "$result" >/dev/null ||
+  { echo "FAIL (measure case): results lack the probe or the error"; exit 1; }
 
 echo PASS

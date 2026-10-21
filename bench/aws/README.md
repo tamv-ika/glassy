@@ -7,8 +7,9 @@
 Với mỗi loại instance (mặc định `c7gn.2xlarge` và `c6in.2xlarge`), script:
 1. chạy 2 instance Amazon Linux 2023 (kernel 6.12) trong một cluster placement group: **DUT** (máy được đo) và **GEN** (máy tạo tải);
 2. build `spikes/cap-probe` ngay trên instance, rồi chạy nó trên DUT hai lần: lần đầu với cấu hình lúc boot, lần sau khi đã chuẩn bị NIC cho XDP native (MTU 1500, dùng một nửa số channel);
-3. gắn `xdp_reflect.o` lên DUT. GEN dùng `pktgen` bắn UDP 64 byte tới port 9 của DUT; script đo delta của `ethtool -S` trên DUT trong 30 giây;
-4. ghi kết quả vào `results/<type>-<UTC timestamp>.json`, rồi **xoá toàn bộ resource**: instance, security group, placement group, key pair.
+3. **ghi ngay** kết quả của `cap-probe` vào `results/<type>-<UTC timestamp>.json`;
+4. gắn `xdp_reflect.o` lên DUT. GEN bắn UDP 64 byte tới port 9 của DUT bằng `pktgen`, hoặc bằng một generator Python chậm hơn nếu AMI không có module `pktgen`. Script đo delta của `ethtool -S` trên DUT trong 30 giây rồi ghi tiếp vào file kết quả. Các bước đo này là best effort: bước nào lỗi thì được ghi vào trường `errors`, phần đo khả năng đã ghi vẫn giữ nguyên, và script kết thúc với exit code khác 0;
+5. **xoá toàn bộ resource**: instance, security group, placement group, key pair.
 
 ## Chi phí và an toàn
 
@@ -58,7 +59,8 @@ Gửi lại các file `bench/aws/results/*.json`, bằng cách tải về qua *A
 | `reflector.tx_pps` | Số gói/giây `xdp_reflect` gửi lại bằng `XDP_TX` (`queue_*_rx_xdp_tx`). |
 | `reflector.allowance_exceeded` | Delta của các counter `bw_in/bw_out/pps/conntrack/linklocal_allowance_exceeded`. Khác 0 nghĩa là đã chạm giới hạn của EC2, không phải của XDP. |
 | `reflector.deltas` | Mọi counter `ethtool -S` có thay đổi, giữ lại để phân tích thêm. |
-| `generator` | Kết quả `pktgen` của từng thread trên GEN. |
+| `generator` | Generator đã dùng (`pktgen` hoặc `python`) cùng kết quả của nó. |
+| `errors` | Các bước đo throughput bị lỗi; rỗng nếu chạy trọn vẹn. |
 
 Security group dùng rule tracked, nên `conntrack_allowance_exceeded` phản ánh đúng giới hạn mà gateway sẽ gặp khi chạy thật.
 
@@ -81,6 +83,6 @@ aws ec2 describe-key-pairs --filters Name=tag-key,Values=glassy-run --query 'Key
 bench/aws/tests/test_teardown.sh   # in PASS
 ```
 
-Test thay `aws`, `ssh`, `scp`, `curl` bằng các shim ghi lại lệnh, rồi kiểm rằng mọi resource đều bị xoá: cả khi chạy thành công lẫn khi một bước `run-probe` lỗi giữa chừng.
+Test thay `aws`, `ssh`, `scp`, `curl` bằng các shim ghi lại lệnh, rồi kiểm rằng mọi resource đều bị xoá trong 3 trường hợp: chạy thành công, bước `setup` lỗi, và bước `measure` lỗi. Ở trường hợp cuối, file kết quả vẫn phải có output của `cap-probe` và có ghi lỗi.
 
 `remote/run-probe.sh` chạy trên instance; mỗi mode in ra một object JSON (xem phần chú thích ở đầu file).

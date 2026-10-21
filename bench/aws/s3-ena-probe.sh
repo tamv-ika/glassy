@@ -218,48 +218,79 @@ shutdown -h +$SELF_DESTRUCT_MINUTES" \
   read -r gen_pub gen_priv <<<"$addrs"
   log "$type: DUT $dut_pub ($dut_priv), GEN $gen_pub ($gen_priv)"
 
-  # 5. Ship and build cap-probe on both.
+  # 5. Ship the sources. The DUT builds cap-probe; the generator only needs a traffic source.
   local host
   for host in "$dut_pub" "$gen_pub"; do
     scp_ "$WORK/glassy.tgz" "ec2-user@$host:glassy.tgz"
     ssh_ "$host" 'mkdir -p glassy && tar xzf glassy.tgz -C glassy' >/dev/null
-    ssh_ "$host" ./glassy/run-probe.sh setup >&2
   done
+  ssh_ "$dut_pub" ./glassy/run-probe.sh setup >&2
 
-  # 6. Capabilities, as booted and after preparing the NIC for native XDP.
-  local probe reflect measure generator
+  # 6. Capabilities, as booted and after preparing the NIC for native XDP. This is the main S3
+  # result, so it is written to disk before anything else can go wrong.
+  local out probe reflect=null measure=null generator=null errors=()
+  out="$RESULTS_DIR/$type-$(date -u +%Y%m%dT%H%M%SZ).json"
   probe=$(ssh_ "$dut_pub" ./glassy/run-probe.sh probe)
+  save_result
 
-  # 7. Reflect while the generator floods UDP port 9; measure on the DUT in the middle.
-  reflect=$(ssh_ "$dut_pub" ./glassy/run-probe.sh reflect-on)
-  ssh_ "$gen_pub" ./glassy/run-probe.sh pktgen "$dut_priv" $((MEASURE_SECS + 6)) \
-    >"$WORK/generator.json" &
-  local gen_pid=$!
-  ((DRY_RUN)) || sleep 3
-  measure=$(ssh_ "$dut_pub" ./glassy/run-probe.sh measure "$MEASURE_SECS")
-  wait "$gen_pid"
-  generator=$(cat "$WORK/generator.json")
-  ssh_ "$dut_pub" ./glassy/run-probe.sh reflect-off >/dev/null
+  # 7. Throughput: reflect while the generator floods UDP port 9, measuring on the DUT in the
+  # middle. Every step is best effort; a failure is recorded in the results, not fatal.
+  if generator=$(ssh_ "$gen_pub" ./glassy/run-probe.sh setup-gen); then
+    if reflect=$(ssh_ "$dut_pub" ./glassy/run-probe.sh reflect-on); then
+      ssh_ "$gen_pub" ./glassy/run-probe.sh generate "$dut_priv" $((MEASURE_SECS + 6)) \
+        >"$WORK/generator.json" &
+      local gen_pid=$!
+      ((DRY_RUN)) || sleep 3
+      measure=$(ssh_ "$dut_pub" ./glassy/run-probe.sh measure "$MEASURE_SECS") ||
+        errors+=("measure failed")
+      if wait "$gen_pid"; then
+        generator=$(cat "$WORK/generator.json")
+      else
+        errors+=("traffic generator failed")
+      fi
+      ssh_ "$dut_pub" ./glassy/run-probe.sh reflect-off >/dev/null || errors+=("reflect-off failed")
+    else
+      errors+=("attaching xdp_reflect failed")
+    fi
+  else
+    errors+=("generator setup failed")
+  fi
+  save_result
+  ((${#errors[@]} == 0)) || MEASURE_FAILED=1
+
   # Free this type's vCPU quota before the next type launches; teardown terminates again
   # (a no-op) and waits for it.
   aws_ ec2 terminate-instances --instance-ids "${ids[@]}" >/dev/null
+}
 
-  # 8. Save the result locally.
-  local out
-  out="$RESULTS_DIR/$type-$(date -u +%Y%m%dT%H%M%SZ).json"
+# Writes probe_type's current results (read from its locals). Remote output that is not JSON
+# is stored as null rather than aborting the run.
+save_result() {
   if ((DRY_RUN)); then
     log "$type: would write $out"
     return 0
   fi
+  local errors_json
+  errors_json=$(printf '%s\n' "${errors[@]}" | jq -R -s 'split("\n") | map(select(length > 0))')
   jq -n --arg type "$type" --arg az "$AZ" --arg ami "$ami" --arg run "$RUN_ID" \
-    --argjson probe "$probe" --argjson reflect "$reflect" --argjson measure "$measure" \
-    --argjson generator "$generator" \
+    --argjson probe "$(json_or_null "$probe")" --argjson reflect "$(json_or_null "$reflect")" \
+    --argjson measure "$(json_or_null "$measure")" \
+    --argjson generator "$(json_or_null "$generator")" --argjson errors "$errors_json" \
     '{instance_type: $type, az: $az, ami: $ami, run_id: $run, probe: $probe,
-      reflect: $reflect, reflector: $measure, generator: $generator}' >"$out"
+      reflect: $reflect, reflector: $measure, generator: $generator, errors: $errors}' >"$out"
   log "$type: wrote $out"
 }
 
+json_or_null() {
+  if jq -e . >/dev/null 2>&1 <<<"$1"; then echo "$1"; else echo null; fi
+}
+
+MEASURE_FAILED=0
 for type in $TYPES; do
   probe_type "$type"
 done
+if ((MEASURE_FAILED)); then
+  log "some throughput measurements failed; see \"errors\" in $RESULTS_DIR"
+  exit 1
+fi
 log "done"

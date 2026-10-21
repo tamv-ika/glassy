@@ -2,12 +2,13 @@
 # Runs on the S3 probe instances (Amazon Linux 2023), driven by s3-ena-probe.sh over SSH.
 # Every mode except setup prints one JSON object on stdout.
 #
-#   setup                 install the toolchain, build cap-probe and the XDP objects
+#   setup                 install the toolchain, build cap-probe and the XDP objects (DUT)
+#   setup-gen             make a traffic generator available: pktgen, else Python (generator)
 #   probe                 cap-probe as booted, then again after preparing the NIC for native XDP
 #   reflect-on            attach xdp_reflect.o (native, falling back to generic)
 #   reflect-off           detach it
 #   measure SECS          rx/tx packet rates and allowance counters over SECS seconds
-#   pktgen DST_IP SECS    flood 64-byte UDP to DST_IP:9 from every CPU for SECS seconds
+#   generate DST_IP SECS  flood 64-byte UDP to DST_IP:9 from every CPU for SECS seconds
 #
 # THROWAWAY: SP0 benchmark tooling.
 set -euo pipefail
@@ -114,12 +115,68 @@ measure() {
 
 pgset() { echo "$2" | sudo tee "$1" >/dev/null; }
 
+# pktgen ships in the kernel's modules-extra package, whose name follows the kernel package
+# (kernel6.12-modules-extra on AL2023's 6.12 AMI). Whether it is there is checked here, before
+# the run depends on it.
+setup_gen() {
+  if ! sudo modprobe pktgen 2>/dev/null; then
+    local kpkg
+    kpkg=$(rpm -qf "/lib/modules/$(uname -r)" --qf '%{NAME}\n' 2>/dev/null | head -1)
+    kpkg=${kpkg%-core}
+    kpkg=${kpkg%-modules}
+    sudo dnf install -y -q "${kpkg:-kernel}-modules-extra-$(uname -r)" >&2 || true
+  fi
+  if sudo modprobe pktgen 2>/dev/null; then
+    echo '{"generator": "pktgen"}'
+  else
+    echo "pktgen unavailable; falling back to a userspace generator" >&2
+    command -v python3 >/dev/null
+    echo '{"generator": "python"}'
+  fi
+}
+
+generate() {
+  if [[ -d /proc/net/pktgen ]]; then
+    pktgen "$@"
+  else
+    python_flood "$@"
+  fi
+}
+
+# Far slower than pktgen, but enough to see whether xdp_reflect keeps up and which allowance
+# counters move. 18-byte payloads make 64-byte Ethernet frames.
+python_flood() {
+  local dst=$1 secs=$2 threads
+  threads=$(nproc)
+  python3 - "$dst" "$secs" "$threads" <<'PY' |
+import os, socket, sys, time
+dst, secs, n = sys.argv[1], float(sys.argv[2]), int(sys.argv[3])
+pids = []
+for i in range(n):
+    pid = os.fork()
+    if pid == 0:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.bind(("", 10000 + i))
+        sent, end = 0, time.monotonic() + secs
+        while time.monotonic() < end:
+            for _ in range(256):
+                try:
+                    s.sendto(b"\0" * 18, (dst, 9))
+                    sent += 1
+                except OSError:
+                    pass
+        os.write(1, f"{sent}\n".encode())
+        os._exit(0)
+    pids.append(pid)
+for pid in pids:
+    os.waitpid(pid, 0)
+PY
+    jq -s --argjson secs "$secs" --argjson threads "$threads" \
+      '{generator: "python", threads: $threads, sent: add, pps: (add / $secs)}'
+}
+
 pktgen() {
   local dst=$1 secs=$2 mac threads t dev
-  if ! sudo modprobe pktgen 2>/dev/null; then
-    sudo dnf install -y -q "kernel-modules-extra-$(uname -r)" >&2
-    sudo modprobe pktgen
-  fi
   # Resolve the DUT's MAC: send one datagram so ARP runs, then read the neighbour table.
   echo -n x >"/dev/udp/$dst/9" || true
   sleep 1
@@ -162,9 +219,10 @@ case ${1:-} in
   reflect-on) reflect_on ;;
   reflect-off) reflect_off ;;
   measure) measure "${2:?seconds}" ;;
-  pktgen) pktgen "${2:?destination IP}" "${3:?seconds}" ;;
+  setup-gen) setup_gen ;;
+  generate) generate "${2:?destination IP}" "${3:?seconds}" ;;
   *)
-    echo "usage: $0 setup|probe|reflect-on|reflect-off|measure SECS|pktgen DST_IP SECS" >&2
+    echo "usage: $0 setup|setup-gen|probe|reflect-on|reflect-off|measure SECS|generate DST_IP SECS" >&2
     exit 2
     ;;
 esac
