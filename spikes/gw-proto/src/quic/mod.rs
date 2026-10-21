@@ -1,6 +1,8 @@
 //! QUIC v1 helpers for the gateway slow path (RFC 9000/9001): Initial decryption, ClientHello
 //! SNI extraction and Retry offload.
 
+pub mod client_hello;
+pub mod crypto_frames;
 pub mod initial;
 
 /// Errors from QUIC first-flight parsing; every variant means "drop the datagram".
