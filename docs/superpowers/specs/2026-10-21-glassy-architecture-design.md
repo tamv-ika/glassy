@@ -219,10 +219,11 @@ DATA: route theo 5-tuple trong fast path, không cần giải mã gì
 
 **Gateway:** parse STUN → lấy phần trước dấu `:` → base64 decode → kiểm routing ticket → tạo flow → forward tới port WebRTC của game server.
 
-**Game server** (libdatachannel, ICE-lite, mux nhiều kết nối trên một port):
+**Game server** (libdatachannel, mux nhiều kết nối trên một port; answer khai `a=ice-lite` nhưng libjuice thực chất là ICE agent đầy đủ):
 - Khi nhận STUN có ufrag lạ: tạo PeerConnection mới. Local ufrag = ufrag trong `USERNAME`; local pwd = `base64(HMAC-SHA256(HKDF(K_gs, "glassy-ice"), ufrag))` (≥ 22 ký tự).
 - Client ufrag lấy từ `USERNAME`, và **pwd của client = ufrag của client** (bước 2 ở trên). Lý do: libjuice là ICE agent đầy đủ nên tự gửi check về browser; browser trả 401 nếu check không mang đúng pwd của client.
 - Bật `disableAutoNegotiation`: server tự dựng offer của phía browser rồi `setRemoteDescription`, sau đó `setLocalDescription(Answer, {ufrag, pwd})`. Nếu không bật, libdatachannel tự sinh answer với credential ngẫu nhiên và lệnh đặt answer sau đó ném `logic_error` (spike S2).
+- **Chỉ tạo PeerConnection sau khi kiểm MESSAGE-INTEGRITY** của binding request bằng pwd dẫn xuất. libjuice gọi callback cho mọi binding request có MESSAGE-INTEGRITY mà không kiểm nó, và một PeerConnection mới sẽ gửi check ICE về địa chỉ khai báo: spike S2 đo được khuếch đại 6.2 lần. Mỗi server ufrag chỉ một PeerConnection, session cũ bị evict. ufrag phải hợp lệ theo RFC 8839, và callback không được ném exception qua C (một gói sai dạng từng làm sập server spike).
 - **Tắt kiểm fingerprint của client.** Client được xác thực bằng server ticket gửi trên channel `reliable`. pwd của client là công khai (nằm trong `USERNAME`), nên check từ server về client không dựa vào bí mật; browser vẫn xác thực server qua DTLS fingerprint.
 - Cách làm này giống libp2p WebRTC-Direct. Spike S2 đã kiểm chứng với libdatachannel v0.24.6 (GnuTLS) và Chromium 141: `IceUdpMuxListener`, callback `OnUnhandledStunRequest`, `LocalDescriptionInit` để đặt ufrag/pwd, `disableFingerprintVerification`. ufrag 80 ký tự được chấp nhận.
 
@@ -251,6 +252,7 @@ Initial #2.. (có token)  → kiểm token → giải mã Initial (key dẫn xu�
                           → tạo flow → forward các gói đã buffer (giữ nguyên token) tới port WT của game server
 ```
 - **Retry mặc định luôn bật** (cấu hình `always` / `never`). Không làm chế độ bật tự động theo tải, để tránh "transition mode".
+- **Bất biến của gateway:** token loại Retry (bit đầu 0) được kiểm ở **cả hai** mode; token không do gateway phát thì drop, vì game server tin mọi token như vậy đến từ gateway. Gateway chỉ xử lý (và chỉ gửi Retry cho) Initial nằm trong datagram ≥ 1200 byte, có DCID 8–20 byte, CID ≤ 20 byte, để Retry không bao giờ lớn hơn gói kích hoạt nó.
 - **Game server (ngtcp2):** token có bit đầu = 0 **và** gói đến từ một IP thuộc `trusted_gateway_cidrs` → **không kiểm token** (đúng yêu cầu của mode no-shared-state), coi như địa chỉ đã được xác thực, đặt `retry_source_connection_id` = DCID của gói, `original_destination_connection_id` = ODCID lấy từ token. Gói mang token nhưng đến từ nguồn khác thì bị drop. Spike S4 đã kiểm chứng với ngtcp2 v1.25.0 + GnuTLS: Chromium chấp nhận transport params này, kể cả khi đi qua gateway có SNAT.
 - Mode no-shared-state đòi hỏi **gateway nằm trên mọi đường vào game server**, nên firewall chặn truy cập trực tiếp vào game server là **bắt buộc** khi bật WebTransport (§5.5). `trusted_gateway_cidrs` là lớp phòng thủ thứ hai khi firewall cấu hình sai.
 - **Fallback port mapping** (mỗi game server một port trên gateway, route theo dst port) **không cần dùng**: spike S1 đạt trên Chromium 141. Chromium không kiểm SAN khi dùng `serverCertificateHashes`, và gateway đọc SNI ngay khi phần đầu của ClientHello đến liền mạch (ClientHello hiện chỉ dài 382 byte, nằm trong 1 datagram; sẽ dài hơn khi bật ML-KEM). Giữ phương án này trong tài liệu phòng khi Firefox/Safari (chưa chạy) không đạt.
@@ -259,7 +261,7 @@ Initial #2.. (có token)  → kiểm token → giải mã Initial (key dẫn xu�
 ### 3.7 Reconnect và vòng đời flow
 
 - **Gateway không học lại flow.** Gói không thuộc flow nào thì chỉ có **gói mở đầu** (`CONNECT`, STUN binding request, QUIC Initial) được lên slow path; mọi gói khác bị **XDP drop**.
-- Flow **chưa xác nhận**: timeout 5s; tối đa 2 flow chưa xác nhận cho mỗi `session_id`. Flow **đã xác nhận** (đã thấy game server trả lời): timeout 60s.
+- Flow **chưa xác nhận**: timeout 5s; tối đa 2 flow chưa xác nhận cho mỗi `session_id`. Flow **đã xác nhận** (đã thấy game server trả lời): timeout 60s. Với WebRTC, "trả lời" phải là STUN success response hoặc DTLS từ server, vì server còn gửi check ICE khi nhận STUN chưa xác thực (§3.5, spike S2).
 - **Client đổi IP/port** (đổi mạng, NAT rebinding, gói rơi vào node gateway khác):
 
 | Transport | Client | Game server |
@@ -277,6 +279,7 @@ Initial #2.. (có token)  → kiểm token → giải mã Initial (key dẫn xu�
 | `K_gs` của một fleet | giả server ticket trong fleet đó | đụng tới fleet khác |
 | Một game server | đọc các session của chính nó | đụng tới game server khác |
 | Ticket native bị sniff | tạo flow chưa xác nhận (≤ 2 flow, 5s) | gửi gói hợp lệ, resume session (thiếu session key cho proof) |
+| Ticket WebRTC bị sniff (ufrag đi dạng rõ) | tạo flow chưa xác nhận; nếu server không kiểm MESSAGE-INTEGRITY trước khi tạo PeerConnection (§3.5) thì còn khiến server gửi check ICE tới địa chỉ giả | hoàn tất DTLS, xác thực như player |
 | Game server bị truy cập trực tiếp (firewall sai) | flood thẳng vào game server; nếu giả được IP nguồn thuộc `trusted_gateway_cidrs` thì bỏ qua được bước xác thực địa chỉ của QUIC | xác thực như player, đọc traffic |
 
 ---
@@ -494,7 +497,7 @@ hết GRACE → on_disconnect
 | Hạng mục | Lựa chọn |
 |---|---|
 | Native UDP | `glassy-proto` (C++) |
-| WebRTC | `libdatachannel`: ICE-lite, mux trên một port, tạo PeerConnection khi nhận STUN lạ, ICE pwd dẫn xuất từ `K_gs` (§3.5) |
+| WebRTC | `libdatachannel`: answer khai `ice-lite`, mux trên một port, tạo PeerConnection khi nhận STUN lạ **sau khi kiểm MESSAGE-INTEGRITY**, mỗi server ufrag một PeerConnection, ICE pwd dẫn xuất từ `K_gs` (§3.5) |
 | WebTransport | `ngtcp2` + **lớp HTTP/3 + WT tối giản tự viết**: SETTINGS (hỗ trợ nhiều phiên bản draft; Chromium 141 dùng draft-02 và chỉ cần `H3_DATAGRAM` `0x33` + `ENABLE_WEBTRANSPORT` `0x2b603742`, spike S4), decode QPACK chỉ với bảng tĩnh và literal (dung lượng bảng động = 0), extended CONNECT, stream WT (bidi `0x41`, uni `0x54`), datagram có prefix quarter stream ID, capsule `CLOSE` / `DRAIN`; nhận token Retry no-shared-state khi nguồn thuộc `trusted_gateway_cidrs`. Ước lượng 1.5k–3k dòng. Code tham khảo: lsquic và `h3zero` của picoquic (đều MIT). |
 | TLS | **GnuTLS** cho cả ngtcp2 (QUIC) và libdatachannel (DTLS): một thư viện, cả hai bên đều hỗ trợ chính thức. Phương án thay thế: aws-lc (QUIC) + Mbed TLS (DTLS), cân nhắc theo kết quả benchmark |
 | Agones | **REST API của sidecar Agones** (`/ready`, `/health`, `/metadata/annotation`, `/watch/gameserver`); không dùng gRPC |

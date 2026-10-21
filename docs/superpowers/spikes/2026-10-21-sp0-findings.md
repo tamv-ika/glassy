@@ -45,6 +45,7 @@ Phần chạy thử trong Nakama thật (cần database) được dời sang SP2
 
 **Việc cho sub-project sau:**
 - **SP5:** gateway parse SNI như prototype: lấy SNI ngay khi đọc được từ phần liền mạch, không cần chờ đủ ClientHello. Cần test lại với Chrome có bật ML-KEM.
+- **SP5, chống khuếch đại (sửa sau review cuối):** chỉ xử lý (và chỉ gửi Retry cho) Initial nằm trong datagram ≥ 1200 byte, có DCID 8–20 byte và CID ≤ 20 byte. Trước khi sửa, prototype trả Retry 56 byte cho một Initial 9 byte (6.2 lần). Test: `short_or_illegal_initial_gets_no_retry`, `connection_id_over_20_bytes_rejected`.
 - **SP4/SP5:** backend HTML5 cần phân biệt lỗi `Opening handshake failed` để chuyển sang WebRTC.
 - **Chạy tay (chưa làm):**
 
@@ -79,6 +80,14 @@ Các điểm khác đã được xác nhận:
 - **Cập nhật spec §3.5:** thêm bước client đặt `ice-pwd = ice-ufrag`, và yêu cầu `disableAutoNegotiation` ở server.
 - **SP4:** backend HTML5 của client SDK phải sửa SDP local. Rủi ro: Chrome có thể siết việc sửa SDP local trong tương lai. libp2p đang phụ thuộc vào cùng hành vi này, nên cần theo dõi.
 - **Bảo mật:** pwd của client là công khai (nằm trong `USERNAME`), nên check từ server về client không được xác thực bằng bí mật. Chấp nhận được, vì browser xác thực server qua DTLS fingerprint, còn server xác thực client bằng server ticket gửi trong channel reliable.
+- **Bảo mật, phát hiện trong review cuối:**
+  1. **STUN chưa xác thực gây phản xạ.** libjuice gọi callback mux cho mọi binding request có thuộc tính MESSAGE-INTEGRITY nhưng **không kiểm được** nó ở bước này. Server khi đó tạo PeerConnection và gửi check ICE về địa chỉ khai báo trong gói. Đo lại: một gói 164 byte với MESSAGE-INTEGRITY giả làm server gửi 5 gói, tổng 1020 byte trong 15 giây (6.2 lần). Qua gateway, bất kỳ gói nào từ backend cũng làm flow thành "đã xác nhận" (60s), nên ai sniff được ticket (ufrag đi dạng rõ) là tạo được flow đã xác nhận và các check phản xạ này. libjuice là ICE agent đầy đủ; dòng `a=ice-lite` chỉ là thứ browser nhìn thấy.
+  2. **Một gói STUN làm sập server (đã sửa).** USERNAME sai dạng (`ab:cdefgh`, hoặc ufrag client rỗng) làm libdatachannel ném exception trong callback, chạy trên thread C của libjuice, nên server bị abort (SIGABRT). Bản sửa kiểm cả hai ufrag theo RFC 8839 (4–256 ice-char) và bắt mọi exception. Test: `S2 server survives malformed STUN usernames`.
+- **SP4, bắt buộc:**
+  - kiểm MESSAGE-INTEGRITY bằng pwd dẫn xuất **trước** khi tạo PeerConnection (cần gói STUN gốc, hoặc sửa libjuice);
+  - mỗi server ufrag chỉ một PeerConnection, và evict session cũ;
+  - gateway chỉ coi flow WebRTC là đã xác nhận khi thấy STUN success response hoặc DTLS từ server, không phải gói bất kỳ;
+  - callback không bao giờ ném exception qua C.
 - **Chạy tay (chưa làm):**
 
   | Browser | Kết quả |
@@ -159,7 +168,7 @@ _Chưa chạy. Người dùng chạy theo `bench/aws/` (Task 14)._
 - Kiểm điều kiện tin token: chạy server với `--trusted-cidr 10.0.0.0/8` sau relay ở 127.0.0.1 → server log `dropping Initial with untrusted token from 127.0.0.1` (5 lần, mỗi lần Chromium gửi lại) và browser báo `Opening handshake failed`. Token Retry chỉ được tin khi đến từ dải của gateway.
 
 **Kết luận: ĐẠT trên Chromium 141.**
-- **Retry + SNAT hoạt động với ngtcp2.** Server chỉ đọc ODCID ở phần cleartext của token, đặt `original_dcid = ODCID` và `retry_scid = DCID của gói` vào transport params, rồi khai `token_type = NGTCP2_TOKEN_TYPE_RETRY`. Chromium kiểm 2 ID này và chấp nhận. Server không cần biết địa chỉ thật của client hay key Retry của gateway. Vậy mode no-shared-state + `trusted_gateway_cidrs` của spec §3.6 đứng vững.
+- **Retry + SNAT hoạt động với ngtcp2.** Server chỉ đọc ODCID ở phần cleartext của token, đặt `original_dcid = ODCID` và `retry_scid = DCID của gói` vào transport params, rồi khai `token_type = NGTCP2_TOKEN_TYPE_RETRY`. Chromium kiểm 2 ID này và chấp nhận. Server không cần biết địa chỉ thật của client hay key Retry của gateway. Vậy mode no-shared-state + `trusted_gateway_cidrs` của spec §3.6 đứng vững, **với điều kiện gateway không bao giờ chuyển tiếp một token loại Retry mà nó chưa kiểm**. Review cuối phát hiện relay ở mode `never` chuyển nguyên token client tự bịa tới server, và server tin token đó. Đã sửa: relay kiểm mọi token có bit đầu 0 ở cả hai mode (test `never_mode_drops_forged_retry_token`, `never_mode_routes_gateway_minted_token`).
 - **Chromium 141 vẫn dùng WebTransport draft-02.** Phía server chỉ bắt buộc 2 SETTING: `H3_DATAGRAM` (`0x33`) và `ENABLE_WEBTRANSPORT` (`0x2b603742`). Server vẫn khai thêm `0x08` và `0xc671706a` để sẵn sàng cho browser dùng draft mới; Chromium bỏ qua 2 giá trị này.
 - **QPACK chỉ cần static table.** Server khai capacity 0 (mặc định), nên request của client không dùng dynamic table, và response `:status 200` là một entry static. nghttp3 chỉ được dùng làm QPACK decoder, không dùng tầng HTTP/3 của nó.
 - **Stream bidi do client mở:** chiều client → server bắt đầu bằng `0x41` + session ID; chiều trả lời **không** có prefix. Server chỉ echo phần payload. Datagram mang prefix quarter stream ID, server gửi lại nguyên vẹn.
