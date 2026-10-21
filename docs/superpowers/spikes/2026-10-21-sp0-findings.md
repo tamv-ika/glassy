@@ -6,6 +6,18 @@
 
 Mỗi mục gồm: **Câu hỏi / Bằng chứng / Kết luận / Việc cho sub-project sau.**
 
+## Tổng hợp
+
+| Spike | Chromium | Firefox | Safari | Kết luận | Fallback |
+|---|---|---|---|---|---|
+| S1 — WT, ticket trong SNI | ĐẠT (141) | chưa chạy (người dùng, `spikes/README.md`) | chưa chạy (người dùng) | ĐẠT trên Chromium; Chromium không kiểm SAN khi dùng `serverCertificateHashes` | không kích hoạt (port mapping không cần) |
+| S2 — WebRTC không signaling | ĐẠT (141) | chưa chạy (người dùng) | chưa chạy (người dùng) | ĐẠT, có 2 điều chỉnh: client đặt `ice-pwd = ice-ufrag`, server bật `disableAutoNegotiation` | không kích hoạt |
+| S3 — XDP/AF_XDP trên ENA | — | — | — | Phần veth ĐẠT; phần ENA chưa chạy (người dùng chạy `bench/aws/s3-ena-probe.sh`) | chưa xác định (chờ số liệu AWS) |
+| S4 — ngtcp2 + Retry qua SNAT, draft WT | ĐẠT (141, draft-02) | chưa chạy (người dùng) | chưa chạy (người dùng) | ĐẠT; Chromium chỉ cần `H3_DATAGRAM` + `ENABLE_WEBTRANSPORT` (draft-02) | không kích hoạt |
+| S5 — `FleetManager` của Nakama | — | — | — | ĐẠT; ConnectInfo trong `SessionInfo.SessionId`; `Init(nk, cb)`; `Create` trả `nil` | không kích hoạt |
+
+Phần chạy thử trong Nakama thật (cần database) được dời sang SP2.
+
 ---
 
 ## S1 — WebTransport với ticket trong SNI

@@ -213,7 +213,7 @@ DATA: route theo 5-tuple trong fast path, không cần giải mã gì
 1. Tạo `RTCPeerConnection` và 2 data channel `negotiated: true` với id cố định:
    - `reliable`: ordered, reliable;
    - `unreliable`: `ordered: false`, `maxRetransmits: 0`.
-2. `createOffer()` → `setLocalDescription()`.
+2. `createOffer()`, **sửa offer để `ice-pwd` = `ice-ufrag`** (chuỗi ngẫu nhiên 32 ký tự, giống quy ước của libp2p WebRTC-Direct), rồi `setLocalDescription()` với offer đã sửa. Nhờ vậy server suy ra được pwd của client từ `USERNAME` và trả lời được các check ICE (spike S2).
 3. **Tự dựng SDP answer từ ConnectInfo**: `a=ice-lite`, `ice-ufrag` = routing ticket (base64), `ice-pwd`, `fingerprint` của cert DTLS game server, `setup:passive`, candidate = các IP gateway `:443/udp`, `sctp-port`, `max-message-size`. Rồi `setRemoteDescription()`.
 4. Browser gửi STUN binding request tới `gateway:443` với `USERNAME = <server_ufrag>:<client_ufrag>`.
 
@@ -221,8 +221,10 @@ DATA: route theo 5-tuple trong fast path, không cần giải mã gì
 
 **Game server** (libdatachannel, ICE-lite, mux nhiều kết nối trên một port):
 - Khi nhận STUN có ufrag lạ: tạo PeerConnection mới. Local ufrag = ufrag trong `USERNAME`; local pwd = `base64(HMAC-SHA256(HKDF(K_gs, "glassy-ice"), ufrag))` (≥ 22 ký tự).
-- Client ufrag lấy từ `USERNAME`. **Tắt kiểm fingerprint của client.** Client được xác thực bằng server ticket gửi trên channel `reliable`.
-- Cách làm này giống libp2p WebRTC-Direct. Các API cần có trong libdatachannel nằm trong spike S2 (§11).
+- Client ufrag lấy từ `USERNAME`, và **pwd của client = ufrag của client** (bước 2 ở trên). Lý do: libjuice là ICE agent đầy đủ nên tự gửi check về browser; browser trả 401 nếu check không mang đúng pwd của client.
+- Bật `disableAutoNegotiation`: server tự dựng offer của phía browser rồi `setRemoteDescription`, sau đó `setLocalDescription(Answer, {ufrag, pwd})`. Nếu không bật, libdatachannel tự sinh answer với credential ngẫu nhiên và lệnh đặt answer sau đó ném `logic_error` (spike S2).
+- **Tắt kiểm fingerprint của client.** Client được xác thực bằng server ticket gửi trên channel `reliable`. pwd của client là công khai (nằm trong `USERNAME`), nên check từ server về client không dựa vào bí mật; browser vẫn xác thực server qua DTLS fingerprint.
+- Cách làm này giống libp2p WebRTC-Direct. Spike S2 đã kiểm chứng với libdatachannel v0.24.6 (GnuTLS) và Chromium 141: `IceUdpMuxListener`, callback `OnUnhandledStunRequest`, `LocalDescriptionInit` để đặt ufrag/pwd, `disableFingerprintVerification`. ufrag 80 ký tự được chấp nhận.
 
 **Đổi mạng:** tạo `RTCPeerConnection` mới với **cùng** ConnectInfo (ticket vẫn còn hạn). ICE, DTLS và SCTP chạy lại; game server resume session bằng server ticket.
 
@@ -249,9 +251,10 @@ Initial #2.. (có token)  → kiểm token → giải mã Initial (key dẫn xu�
                           → tạo flow → forward các gói đã buffer (giữ nguyên token) tới port WT của game server
 ```
 - **Retry mặc định luôn bật** (cấu hình `always` / `never`). Không làm chế độ bật tự động theo tải, để tránh "transition mode".
-- **Game server (ngtcp2):** token có bit đầu = 0 **và** gói đến từ một IP thuộc `trusted_gateway_cidrs` → **không kiểm token** (đúng yêu cầu của mode no-shared-state), coi như địa chỉ đã được xác thực, đặt `retry_source_connection_id` = DCID của gói, `original_destination_connection_id` = ODCID lấy từ token. Gói mang token nhưng đến từ nguồn khác thì bị drop.
+- **Game server (ngtcp2):** token có bit đầu = 0 **và** gói đến từ một IP thuộc `trusted_gateway_cidrs` → **không kiểm token** (đúng yêu cầu của mode no-shared-state), coi như địa chỉ đã được xác thực, đặt `retry_source_connection_id` = DCID của gói, `original_destination_connection_id` = ODCID lấy từ token. Gói mang token nhưng đến từ nguồn khác thì bị drop. Spike S4 đã kiểm chứng với ngtcp2 v1.25.0 + GnuTLS: Chromium chấp nhận transport params này, kể cả khi đi qua gateway có SNAT.
 - Mode no-shared-state đòi hỏi **gateway nằm trên mọi đường vào game server**, nên firewall chặn truy cập trực tiếp vào game server là **bắt buộc** khi bật WebTransport (§5.5). `trusted_gateway_cidrs` là lớp phòng thủ thứ hai khi firewall cấu hình sai.
-- **Fallback** nếu spike S1 thất bại: mỗi game server một port trên gateway. Broker cấp port, gateway route theo dst port. Không cần SNI, nhưng phải có pool port và bảng map.
+- **Fallback port mapping** (mỗi game server một port trên gateway, route theo dst port) **không cần dùng**: spike S1 đạt trên Chromium 141. Chromium không kiểm SAN khi dùng `serverCertificateHashes`, và gateway đọc SNI ngay khi phần đầu của ClientHello đến liền mạch (ClientHello hiện chỉ dài 382 byte, nằm trong 1 datagram; sẽ dài hơn khi bật ML-KEM). Giữ phương án này trong tài liệu phòng khi Firefox/Safari (chưa chạy) không đạt.
+- Browser đứng sau HTTP proxy bắt buộc sẽ không gửi gói UDP nào cho WebTransport (lỗi chỉ là `Opening handshake failed`). Client HTML5 phải coi lỗi này là tín hiệu để chuyển sang WebRTC.
 
 ### 3.7 Reconnect và vòng đời flow
 
@@ -334,9 +337,11 @@ Chạy lúc khởi động, theo thứ tự:
 1. Kernel và BTF.
 2. Driver NIC (`ethtool -i`: `ena`, `gve`, `mlx5_core`, `ice`, …).
 3. Thử attach XDP ở driver mode → không được thì generic mode.
-4. Thử bind AF_XDP với `XDP_ZEROCOPY` → không được thì `XDP_COPY`.
-5. Giới hạn MTU khi bật XDP.
+4. Thử bind AF_XDP với `XDP_ZEROCOPY` → không được thì `XDP_COPY`. Gặp `EBUSY` thì bind lại sau 50ms (tối đa khoảng 2s): kernel giải phóng queue của socket AF_XDP đã đóng một cách bất đồng bộ, nên probe ngay sau một probe khác sẽ báo "bận" thay vì kết quả thật (spike S3, veth).
+5. Giới hạn MTU khi bật XDP: ENA chỉ nhận XDP native khi MTU ≤ khoảng 3498, trong khi EC2 mặc định MTU 9001. Detector báo rõ lý do và cho phép tự hạ MTU.
 6. Số queue (đồng bộ RX/TX; riêng **ENA chỉ dùng tối đa một nửa số queue** khi bật XDP).
+
+Công cụ đo `spikes/cap-probe` (đã chạy được trên veth) là bản mẫu của detector. Số liệu ENA thật chờ kết quả `bench/aws/s3-ena-probe.sh` (S3).
 
 Kết quả: mode cao nhất chạy được, kèm báo cáo (log, metric `capability_info`, endpoint `/capabilities`). Có thể ép mode bằng config. Tham khảo thêm `quilkin/src/net/io/nic/xdp/diagnostics.rs`.
 
@@ -417,10 +422,11 @@ ConnectInfo {
 
 ### 5.4 `glassy-nakama` (Go plugin)
 
-- Implement `FleetManager` và đăng ký bằng `initializer.RegisterFleetManager(...)`.
-- Map hàm: `Create` → `Allocate`; `Join` → `Join`; `Get` / `List` / `Delete` → hàm cùng tên.
-- ConnectInfo của từng player đi theo kết quả callback; code runtime Nakama của game gửi nó cho đúng client qua notification hoặc phản hồi RPC.
-- **Cần kiểm chứng ở SP2 (spike S5):** type chính xác của `FleetManager` (`InstanceInfo`, `JoinInfo`, `SessionInfo`, callback của `Create`) và chỗ đặt ConnectInfo. Go plugin phải build đúng phiên bản Go và dependency của Nakama.
+- Implement `runtime.FleetManagerInitializer` (nakama-common v1.48.0 / Nakama v3.41.0) và đăng ký bằng `initializer.RegisterFleetManager(...)`. Nakama gọi `Init(nk runtime.NakamaModule, callbackHandler runtime.FmCallbackHandler)` lúc đăng ký.
+- Map hàm: `Create` → `Allocate`; `Join` → `Join`; `Get` / `List` / `Delete` → hàm cùng tên. `Update` là no-op, vì số player lấy từ Agones.
+- **ConnectInfo của từng player nằm trong `SessionInfo.SessionId`**, dạng base64url không padding của JSON, encode **không** HTML-escape. Mỗi user một `SessionInfo`, theo thứ tự `userIds`. Code runtime của game (hook `MatchmakerMatched` hoặc RPC) gọi `Create`, rồi gửi `SessionId` cho đúng client qua notification hoặc phản hồi RPC. `InstanceInfo.ConnectionInfo` chỉ để tham khảo.
+- `Create` trả map `nil`, vì core Nakama không bao giờ gọi `Create` và không đọc giá trị này. Phần allocate chạy trong goroutine tách khỏi context của caller (`context.WithoutCancel` + timeout riêng), rồi báo kết quả qua `callbackHandler.InvokeCallback`. Registry callback là **cục bộ trên từng node**, nên kết quả phải được invoke trên đúng node đã gọi `Create`.
+- Plugin phải build trùng chính xác Go 1.27.1, các version dependency và cờ build của Nakama (`-trimpath`…). Dùng image `heroiclabs/nakama-pluginbuilder:<version>`. Đã kiểm chứng ở spike S5 (prototype + load thử bằng `plugin.Open`); chạy trong Nakama thật (cần database) để SP2.
 
 ### 5.5 Triển khai (portable)
 
@@ -489,7 +495,7 @@ hết GRACE → on_disconnect
 |---|---|
 | Native UDP | `glassy-proto` (C++) |
 | WebRTC | `libdatachannel`: ICE-lite, mux trên một port, tạo PeerConnection khi nhận STUN lạ, ICE pwd dẫn xuất từ `K_gs` (§3.5) |
-| WebTransport | `ngtcp2` + **lớp HTTP/3 + WT tối giản tự viết**: SETTINGS (hỗ trợ nhiều phiên bản draft), decode QPACK chỉ với bảng tĩnh và literal (dung lượng bảng động = 0), extended CONNECT, stream WT (bidi `0x41`, uni `0x54`), datagram có prefix quarter stream ID, capsule `CLOSE` / `DRAIN`; nhận token Retry no-shared-state khi nguồn thuộc `trusted_gateway_cidrs`. Ước lượng 1.5k–3k dòng. Code tham khảo: lsquic và `h3zero` của picoquic (đều MIT). |
+| WebTransport | `ngtcp2` + **lớp HTTP/3 + WT tối giản tự viết**: SETTINGS (hỗ trợ nhiều phiên bản draft; Chromium 141 dùng draft-02 và chỉ cần `H3_DATAGRAM` `0x33` + `ENABLE_WEBTRANSPORT` `0x2b603742`, spike S4), decode QPACK chỉ với bảng tĩnh và literal (dung lượng bảng động = 0), extended CONNECT, stream WT (bidi `0x41`, uni `0x54`), datagram có prefix quarter stream ID, capsule `CLOSE` / `DRAIN`; nhận token Retry no-shared-state khi nguồn thuộc `trusted_gateway_cidrs`. Ước lượng 1.5k–3k dòng. Code tham khảo: lsquic và `h3zero` của picoquic (đều MIT). |
 | TLS | **GnuTLS** cho cả ngtcp2 (QUIC) và libdatachannel (DTLS): một thư viện, cả hai bên đều hỗ trợ chính thức. Phương án thay thế: aws-lc (QUIC) + Mbed TLS (DTLS), cân nhắc theo kết quả benchmark |
 | Agones | **REST API của sidecar Agones** (`/ready`, `/health`, `/metadata/annotation`, `/watch/gameserver`); không dùng gRPC |
 | Khởi động | đọc `K_gs` và `trusted_gateway_cidrs` → sinh cert DTLS và cert WT → ghi annotation `glassy.dev/dtls-fp`, `glassy.dev/wt-cert-sha256` → `Ready()` |
@@ -595,13 +601,15 @@ DNS wildcard cho WebTransport khi test không cần Route53:
 
 ## 11. Các spike của SP0
 
-| # | Câu hỏi | Đạt khi | Nếu thất bại |
-|---|---|---|---|
-| S1 | WT với ticket trong SNI: Chrome, Firefox, Safari có chấp nhận URL dạng hostname dài kèm `serverCertificateHashes` mà **không kiểm tên trong cert** không? Gateway có parse được ClientHello trải nhiều gói (ML-KEM, chaos protection) không? | browser kết nối thành công qua một prototype gateway | port mapping cho mỗi game server (§3.6) |
-| S2 | WebRTC không signaling: browser có chấp nhận SDP answer tự dựng (`ice-lite`, ufrag ~80 ký tự, data channel `negotiated`) không? libdatachannel có: mux listener kèm callback khi gặp STUN lạ, cho đặt ufrag/pwd local, cho tắt kiểm fingerprint không? | browser ↔ server prototype trao đổi được data | (a) ticket ngắn hơn (chỉ số tra bảng); (b) signaling relay qua Nakama |
-| S3 | ENA trên c7gn và c6in (Amazon Linux 2023, kernel 6.12), chạy ở tầng 3 trong ~1–2 giờ: XDP driver mode, `XDP_TX`, ràng buộc queue và MTU, AF_XDP zero-copy, pps của một reflector `XDP_TX` | có bảng capability và pps nền | detector chọn mode thấp hơn; điều chỉnh mục tiêu §0.2 |
-| S4 | Chrome, Firefox, Safari hiện dùng phiên bản draft WT nào (SETTINGS, loại stream)? ngtcp2 + GnuTLS có hoàn tất handshake khi nhận token Retry no-shared-state do gateway phát (đi qua SNAT) không? | handshake + datagram + bidi stream chạy được với Chrome và Firefox | lớp WT hỗ trợ nhiều draft; nếu cần, xem lại lsquic |
-| S5 | Type chính xác của `FleetManager` trong Nakama và chỗ đặt ConnectInfo cho từng user | prototype module Go gọi được broker giả lập | dùng hook `MatchmakerMatched` + RPC |
+Chi tiết: `docs/superpowers/spikes/2026-10-21-sp0-findings.md`.
+
+| # | Câu hỏi | Đạt khi | Nếu thất bại | Kết quả |
+|---|---|---|---|---|
+| S1 | WT với ticket trong SNI: Chrome, Firefox, Safari có chấp nhận URL dạng hostname dài kèm `serverCertificateHashes` mà **không kiểm tên trong cert** không? Gateway có parse được ClientHello trải nhiều gói (ML-KEM, chaos protection) không? | browser kết nối thành công qua một prototype gateway | port mapping cho mỗi game server (§3.6) | ĐẠT trên Chromium 141; Firefox/Safari chưa chạy (chạy tay). Không cần port mapping |
+| S2 | WebRTC không signaling: browser có chấp nhận SDP answer tự dựng (`ice-lite`, ufrag ~80 ký tự, data channel `negotiated`) không? libdatachannel có: mux listener kèm callback khi gặp STUN lạ, cho đặt ufrag/pwd local, cho tắt kiểm fingerprint không? | browser ↔ server prototype trao đổi được data | (a) ticket ngắn hơn (chỉ số tra bảng); (b) signaling relay qua Nakama | ĐẠT trên Chromium 141, với điều kiện client đặt `ice-pwd = ice-ufrag` và server bật `disableAutoNegotiation` (§3.5); Firefox/Safari chưa chạy |
+| S3 | ENA trên c7gn và c6in (Amazon Linux 2023, kernel 6.12), chạy ở tầng 3 trong ~1–2 giờ: XDP driver mode, `XDP_TX`, ràng buộc queue và MTU, AF_XDP zero-copy, pps của một reflector `XDP_TX` | có bảng capability và pps nền | detector chọn mode thấp hơn; điều chỉnh mục tiêu §0.2 | Phần veth ĐẠT (`cap-probe`); phần ENA chờ người dùng chạy `bench/aws/s3-ena-probe.sh` |
+| S4 | Chrome, Firefox, Safari hiện dùng phiên bản draft WT nào (SETTINGS, loại stream)? ngtcp2 + GnuTLS có hoàn tất handshake khi nhận token Retry no-shared-state do gateway phát (đi qua SNAT) không? | handshake + datagram + bidi stream chạy được với Chrome và Firefox | lớp WT hỗ trợ nhiều draft; nếu cần, xem lại lsquic | ĐẠT trên Chromium 141 (draft-02), cả handshake qua Retry + SNAT; Firefox/Safari chưa chạy |
+| S5 | Type chính xác của `FleetManager` trong Nakama và chỗ đặt ConnectInfo cho từng user | prototype module Go gọi được broker giả lập | dùng hook `MatchmakerMatched` + RPC | ĐẠT: `Init(nk, cb)`, ConnectInfo trong `SessionInfo.SessionId`, `Create` trả `nil` (§5.4); chạy trong Nakama thật để SP2 |
 
 ---
 
@@ -624,11 +632,10 @@ Không bao giờ dán key hay credential vào chat. Nếu sau này muốn Claude
 
 ## 13. Các điểm còn mở cần kiểm chứng
 
-- Type `FleetManager` của Nakama (S5).
 - Agones: phiên bản tối thiểu cần hỗ trợ; một GameServer có 3 port `Dynamic`; với `addressMode: podIP`, lấy pod IP từ `status.addresses`.
-- libdatachannel: các API cho WebRTC không signaling (S2).
-- Phiên bản draft WT của browser (S4).
-- Ràng buộc XDP và AF_XDP của ENA trên các instance mục tiêu (S3).
+- Ràng buộc XDP và AF_XDP của ENA trên các instance mục tiêu, cùng pps nền (S3, chờ số liệu AWS).
+- Firefox và Safari: WT với ticket trong SNI, WebRTC không signaling, draft WT (S1, S2, S4, chạy tay).
+- Chromium bật ML-KEM: ClientHello trải 2 datagram qua Retry (relay đã có unit test, chưa thử với browser).
 - Giá trị byte cụ thể của các loại gói native, kích thước `seq` và header (SP1).
 
 ---
