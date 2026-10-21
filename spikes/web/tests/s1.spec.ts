@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { expect, test } from '@playwright/test';
 import { SPIKES, GW_PROTO, buildRust, genCert, mintConnectInfo, startProc, startRelay, stopAll } from './procs';
@@ -31,10 +32,15 @@ for (const [name, port] of [['direct', 7102], ['via gw-proto SNI', 4443]] as con
 }
 
 test('S1 capture: Chromium Initial datagrams', async ({ page }) => {
-  fs.rmSync(CAPTURE_DIR, { recursive: true, force: true });
-  await startProc(GW_PROTO, ['capture', '--listen', '127.0.0.1:4444', '--out', CAPTURE_DIR, '--count', '4'], 'READY');
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'glassy-capture-'));
+  await startProc(GW_PROTO, ['capture', '--listen', '127.0.0.1:4444', '--out', out, '--count', '4'], 'READY');
   await page.goto('/s1.html');
   // Nothing answers on 4444, so the connection attempt fails; only the captured datagrams matter.
   await page.evaluate(() => (window as any).runS1(4444).catch(() => null));
-  expect(fs.readdirSync(CAPTURE_DIR).length).toBeGreaterThan(0);
+  expect(fs.readdirSync(out).length).toBeGreaterThan(0);
+  // Committed fixtures change only on request, so routine runs keep the tree clean.
+  if (process.env.UPDATE_FIXTURES === '1') {
+    fs.rmSync(CAPTURE_DIR, { recursive: true, force: true });
+    fs.cpSync(out, CAPTURE_DIR, { recursive: true });
+  }
 });

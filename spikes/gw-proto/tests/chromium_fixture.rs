@@ -1,6 +1,6 @@
 //! Parses real Chromium Initial datagrams captured by `gw-proto capture` (spike S1).
 //!
-//! Regenerate the fixtures with `npx playwright test s1` in `spikes/web`; the ticket inside was
+//! Regenerate the fixtures with `UPDATE_FIXTURES=1 npx playwright test s1` in `spikes/web`; the ticket inside was
 //! minted with the fixed spike key, so the test can open it.
 
 use gw_proto::quic::client_hello::{HelloParse, parse_sni};
