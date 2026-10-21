@@ -14,12 +14,22 @@ use anyhow::Context;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use crate::quic::client_hello::{HelloParse, parse_sni};
+use crate::quic::crypto_frames::CryptoAssembler;
+use crate::quic::initial::{client_initial_keys, decrypt_initial, parse_initial_header};
+use crate::quic::retry::{build_retry, mint_token, validate_token};
 use crate::stun::server_ufrag;
-use crate::ticket::{KeyRing, from_ufrag, open};
+use crate::ticket::{KeyRing, from_sni, from_ufrag, open};
 
 /// Datagram buffer size; game traffic is never fragmented (spec §4.6).
 const MAX_DATAGRAM: usize = 2048;
 const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+/// A ClientHello may span at most this many Initial datagrams before the gateway gives up.
+const MAX_HELLO_DATAGRAMS: usize = 2;
+/// Upper bound on buffered CRYPTO bytes per pending handshake.
+const MAX_HELLO_BYTES: usize = 8192;
+/// Retry tokens only need to survive one client round trip.
+const RETRY_TOKEN_LIFETIME_SECS: u64 = 10;
 
 #[derive(Clone, Debug, Default)]
 pub struct Backend {
@@ -117,8 +127,18 @@ struct Counters {
     hello_timeouts: AtomicU64,
 }
 
+/// Initial datagrams held until the ClientHello reveals the SNI ticket.
+struct PendingHello {
+    datagrams: Vec<Vec<u8>>,
+    crypto: CryptoAssembler,
+    started: Instant,
+}
+
+type HelloKey = (SocketAddr, Vec<u8>);
+
 struct Shared {
     flows: Mutex<HashMap<SocketAddr, Flow>>,
+    pending: Mutex<HashMap<HelloKey, PendingHello>>,
     counters: Counters,
     epoch: Instant,
 }
@@ -158,6 +178,7 @@ pub async fn spawn(cfg: RelayConfig) -> anyhow::Result<RelayHandle> {
     let local_addr = sock.local_addr()?;
     let shared = Arc::new(Shared {
         flows: Mutex::new(HashMap::new()),
+        pending: Mutex::new(HashMap::new()),
         counters: Counters::default(),
         epoch: Instant::now(),
     });
@@ -202,7 +223,8 @@ async fn serve(sock: Arc<UdpSocket>, shared: Arc<Shared>, cfg: Arc<RelayConfig>)
                         .fetch_add(1, Ordering::Relaxed);
                 }
             },
-            FirstPacket::QuicLong | FirstPacket::Other => {
+            FirstPacket::QuicLong => handle_quic(pkt, client, &sock, &shared, &cfg).await,
+            FirstPacket::Other => {
                 shared
                     .counters
                     .dropped_unknown_flow
@@ -210,6 +232,141 @@ async fn serve(sock: Arc<UdpSocket>, shared: Arc<Shared>, cfg: Arc<RelayConfig>)
             }
         }
     }
+}
+
+enum HelloStep {
+    Wait,
+    Route(String, Vec<Vec<u8>>),
+    Fail,
+}
+
+/// Handles a long-header packet from an unknown 5-tuple: Retry offload, then ClientHello
+/// buffering until the SNI ticket names a backend (spec §3.6).
+async fn handle_quic(
+    pkt: &[u8],
+    client: SocketAddr,
+    sock: &Arc<UdpSocket>,
+    shared: &Arc<Shared>,
+    cfg: &Arc<RelayConfig>,
+) {
+    let counters = &shared.counters;
+    let Ok(hdr) = parse_initial_header(pkt) else {
+        counters
+            .dropped_unknown_flow
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+    let now = u64::from(unix_now());
+    if cfg.retry == RetryMode::Always {
+        // No token, or a NEW_TOKEN token (first bit set) that only the server could validate.
+        let has_retry_token = hdr.token.first().is_some_and(|b| b & 0x80 == 0);
+        if !has_retry_token {
+            let rscid: [u8; 8] = rand::random();
+            let token = mint_token(
+                &cfg.retry_key,
+                hdr.dcid,
+                client,
+                &rscid,
+                now + RETRY_TOKEN_LIFETIME_SECS,
+            );
+            let _ = sock
+                .send_to(&build_retry(hdr.scid, &rscid, hdr.dcid, &token), client)
+                .await;
+            counters.retries_sent.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if validate_token(&cfg.retry_key, hdr.token, client, hdr.dcid, now).is_err() {
+            counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    let Ok(initial) = decrypt_initial(pkt, &client_initial_keys(hdr.dcid)) else {
+        counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);
+        return;
+    };
+
+    let key: HelloKey = (client, hdr.dcid.to_vec());
+    let (step, armed) = {
+        let mut pending = shared.pending.lock().expect("pending lock");
+        let armed = !pending.contains_key(&key);
+        let hello = pending.entry(key.clone()).or_insert_with(|| PendingHello {
+            datagrams: Vec::new(),
+            crypto: CryptoAssembler::new(MAX_HELLO_BYTES),
+            started: Instant::now(),
+        });
+        hello.datagrams.push(pkt.to_vec());
+        let parsed = hello
+            .crypto
+            .ingest_payload(&initial.payload)
+            .and_then(|()| parse_sni(hello.crypto.contiguous()));
+        let wait = matches!(parsed, Ok(HelloParse::Incomplete))
+            && hello.datagrams.len() < MAX_HELLO_DATAGRAMS;
+        let started = hello.started;
+        let step = match parsed {
+            _ if wait => HelloStep::Wait,
+            Ok(HelloParse::Sni(host)) => HelloStep::Route(
+                host,
+                pending
+                    .remove(&key)
+                    .map(|h| h.datagrams)
+                    .unwrap_or_default(),
+            ),
+            _ => {
+                pending.remove(&key);
+                HelloStep::Fail
+            }
+        };
+        (step, armed.then_some(started))
+    };
+
+    match step {
+        HelloStep::Wait => {
+            if let Some(started) = armed {
+                arm_hello_timeout(shared.clone(), key, started, cfg.hello_timeout);
+            }
+        }
+        HelloStep::Route(host, datagrams) => match route_sni(&host, cfg) {
+            Some(backend) => {
+                if let Ok(upstream) = open_flow(sock, shared, client, backend).await {
+                    for d in datagrams {
+                        let _ = upstream.send(&d).await;
+                    }
+                }
+            }
+            None => {
+                counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);
+            }
+        },
+        HelloStep::Fail => {
+            counters.dropped_bad_ticket.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Drops a ClientHello that never completed, so half-open handshakes cannot pin memory.
+fn arm_hello_timeout(shared: Arc<Shared>, key: HelloKey, started: Instant, after: Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(after).await;
+        let mut pending = shared.pending.lock().expect("pending lock");
+        if pending.get(&key).is_some_and(|h| h.started == started) {
+            pending.remove(&key);
+            shared
+                .counters
+                .hello_timeouts
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Resolves the WebTransport backend named by the ticket in the SNI.
+fn route_sni(host: &str, cfg: &RelayConfig) -> Option<SocketAddr> {
+    let ticket = open(
+        &from_sni(host, &cfg.sni_suffix).ok()?,
+        &cfg.ring,
+        unix_now(),
+    )
+    .ok()?;
+    cfg.backends.get(&ticket.server_id)?.wt
 }
 
 /// Resolves the WebRTC backend named by the ticket in the STUN USERNAME.

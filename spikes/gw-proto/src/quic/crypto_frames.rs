@@ -109,11 +109,13 @@ impl CryptoAssembler {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn crypto_frame(offset: u64, data: &[u8]) -> Vec<u8> {
+/// Encodes one CRYPTO frame with 4-byte varints; used by tests to build Initial payloads.
+pub fn crypto_frame(offset: u64, data: &[u8]) -> Vec<u8> {
     let mut f = vec![0x06];
-    f.extend_from_slice(&(u32::try_from(offset).unwrap() | 0x8000_0000).to_be_bytes());
-    f.extend_from_slice(&(u32::try_from(data.len()).unwrap() | 0x8000_0000).to_be_bytes());
+    let offset = u32::try_from(offset).expect("test offsets fit 30 bits");
+    let len = u32::try_from(data.len()).expect("test frames fit 30 bits");
+    f.extend_from_slice(&(offset | 0x8000_0000).to_be_bytes());
+    f.extend_from_slice(&(len | 0x8000_0000).to_be_bytes());
     f.extend_from_slice(data);
     f
 }

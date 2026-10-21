@@ -42,6 +42,15 @@ enum Cmd {
         #[arg(long)]
         sni_suffix: String,
     },
+    /// Record the first datagrams sent to `listen` as `<out>/<i>.bin` (for browser fixtures).
+    Capture {
+        #[arg(long)]
+        listen: SocketAddr,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        count: usize,
+    },
     /// Mint a ticket and print the ConnectInfo JSON on stdout.
     Mint {
         #[arg(long)]
@@ -116,6 +125,21 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             println!("READY {}", handle.local_addr);
             tokio::signal::ctrl_c().await?;
+        }
+        Cmd::Capture { listen, out, count } => {
+            let sock = tokio::net::UdpSocket::bind(listen).await?;
+            std::fs::create_dir_all(&out)?;
+            println!("READY {}", sock.local_addr()?);
+            let mut buf = [0u8; 2048];
+            for i in 0..count {
+                // Stop after 5 s of silence: browsers give up long before that.
+                let Ok(Ok((n, _))) =
+                    tokio::time::timeout(Duration::from_secs(5), sock.recv_from(&mut buf)).await
+                else {
+                    break;
+                };
+                std::fs::write(out.join(format!("{i}.bin")), &buf[..n])?;
+            }
         }
         Cmd::Mint {
             k_gw,
