@@ -4,6 +4,7 @@
 
 pub mod connect_info;
 pub mod ice;
+pub mod quic;
 pub mod relay;
 pub mod stun;
 pub mod ticket;
