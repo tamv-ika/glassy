@@ -1,0 +1,172 @@
+// S2 spike server: ICE-lite WebRTC data-channel echo without a signaling server (spec §3.5).
+//
+// A browser builds the server's SDP answer itself from ConnectInfo. The first thing this server
+// ever sees from a client is a STUN binding request with an unknown ufrag; that request is enough
+// to synthesize the client's offer and create the PeerConnection on the fly.
+
+#include <rtc/rtc.hpp>
+
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "ice_pwd.hpp"
+
+namespace {
+
+struct Args {
+  uint16_t port = 7101;
+  std::array<uint8_t, 32> k_gs{};
+  std::string cert;
+  std::string key;
+};
+
+std::array<uint8_t, 32> parse_hex32(const std::string& hex) {
+  if (hex.size() != 64) {
+    throw std::invalid_argument("--k-gs must be 64 hex chars");
+  }
+  std::array<uint8_t, 32> out{};
+  for (size_t i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<uint8_t>(std::stoi(hex.substr(i * 2, 2), nullptr, 16));
+  }
+  return out;
+}
+
+Args parse_args(int argc, char** argv) {
+  Args a;
+  for (int i = 1; i + 1 < argc; i += 2) {
+    const std::string flag = argv[i];
+    const std::string value = argv[i + 1];
+    if (flag == "--port") {
+      a.port = static_cast<uint16_t>(std::stoi(value));
+    } else if (flag == "--k-gs") {
+      a.k_gs = parse_hex32(value);
+    } else if (flag == "--cert") {
+      a.cert = value;
+    } else if (flag == "--key") {
+      a.key = value;
+    } else {
+      throw std::invalid_argument("unknown flag " + flag);
+    }
+  }
+  if (a.cert.empty() || a.key.empty()) {
+    throw std::invalid_argument("--cert and --key are required");
+  }
+  return a;
+}
+
+// The browser's real offer never reaches us, so this stand-in only needs to carry the client's
+// ufrag. The DTLS fingerprint is a placeholder because fingerprint verification is disabled;
+// clients authenticate later with the server ticket on the reliable channel.
+std::string synthesized_offer(const std::string& remote_ufrag) {
+  return "v=0\r\n"
+         "o=- 0 0 IN IP4 0.0.0.0\r\n"
+         "s=-\r\n"
+         "t=0 0\r\n"
+         "a=group:BUNDLE 0\r\n"
+         "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+         "c=IN IP4 0.0.0.0\r\n"
+         "a=mid:0\r\n"
+         "a=ice-ufrag:" +
+         remote_ufrag +
+         "\r\n"
+         "a=ice-pwd:glassyremotepwdunused00\r\n"
+         "a=fingerprint:sha-256 "
+         "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:"
+         "00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00\r\n"
+         "a=setup:active\r\n"
+         "a=sctp-port:5000\r\n"
+         "a=max-message-size:262144\r\n";
+}
+
+void echo_on(const std::shared_ptr<rtc::DataChannel>& dc) {
+  std::weak_ptr<rtc::DataChannel> weak = dc;
+  dc->onMessage([weak](rtc::message_variant msg) {
+    if (auto ch = weak.lock()) {
+      ch->send(std::move(msg));
+    }
+  });
+}
+
+struct Session {
+  std::shared_ptr<rtc::PeerConnection> pc;
+  std::shared_ptr<rtc::DataChannel> reliable;
+  std::shared_ptr<rtc::DataChannel> unreliable;
+};
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  Args args;
+  try {
+    args = parse_args(argc, argv);
+  } catch (const std::exception& e) {
+    std::cerr << "usage: s2-webrtc-server --port N --k-gs HEX64 --cert PEM --key PEM (" << e.what()
+              << ")\n";
+    return 2;
+  }
+  rtc::InitLogger(rtc::LogLevel::Warning);
+
+  std::mutex mu;
+  std::map<std::string, Session> sessions;  // keyed by "<server ufrag>:<client ufrag>"
+
+  rtc::IceUdpMuxListener listener(args.port);
+  listener.OnUnhandledStunRequest([&](rtc::IceUdpMuxRequest req) {
+    const std::string key = req.localUfrag + ":" + req.remoteUfrag;
+    std::lock_guard lock(mu);
+    if (sessions.contains(key)) {
+      return;
+    }
+    std::cerr << "new session from " << req.remoteAddress << ":" << req.remotePort << "\n";
+
+    rtc::Configuration config;
+    config.enableIceUdpMux = true;
+    config.portRangeBegin = args.port;
+    config.portRangeEnd = args.port;
+    config.disableFingerprintVerification = true;
+    config.certificatePemFile = args.cert;
+    config.keyPemFile = args.key;
+
+    Session s;
+    s.pc = std::make_shared<rtc::PeerConnection>(config);
+    s.pc->onStateChange([key](rtc::PeerConnection::State state) {
+      std::cerr << "session " << key.substr(0, 12) << "... state " << state << "\n";
+    });
+    s.pc->setRemoteDescription(
+        rtc::Description(synthesized_offer(req.remoteUfrag), rtc::Description::Type::Offer));
+    s.pc->addRemoteCandidate(rtc::Candidate("candidate:1 1 UDP 1 " + req.remoteAddress + " " +
+                                                std::to_string(req.remotePort) + " typ host",
+                                            "0"));
+
+    rtc::DataChannelInit reliable_init;
+    reliable_init.negotiated = true;
+    reliable_init.id = 0;
+    s.reliable = s.pc->createDataChannel("reliable", reliable_init);
+    echo_on(s.reliable);
+
+    rtc::DataChannelInit unreliable_init;
+    unreliable_init.negotiated = true;
+    unreliable_init.id = 1;
+    unreliable_init.reliability.unordered = true;
+    unreliable_init.reliability.maxRetransmits = 0;
+    s.unreliable = s.pc->createDataChannel("unreliable", unreliable_init);
+    echo_on(s.unreliable);
+
+    s.pc->setLocalDescription(
+        rtc::Description::Type::Answer,
+        rtc::LocalDescriptionInit{.iceUfrag = req.localUfrag,
+                                  .icePwd = glassy::ice_pwd(args.k_gs, req.localUfrag)});
+    sessions.emplace(key, std::move(s));
+  });
+
+  std::cout << "READY" << std::endl;
+  for (;;) {
+    std::this_thread::sleep_for(std::chrono::hours(1));
+  }
+}
