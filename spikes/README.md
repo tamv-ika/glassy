@@ -11,6 +11,7 @@ Quy ước (comment tiếng Anh, test Rust bằng `cargo nextest run`, giới h�
 | Thư mục | Spike | Nội dung |
 |---|---|---|
 | `gw-proto/` | S1, S2, S4 | Gateway prototype ở userspace (Rust) |
+| `s1-wt-server/` | S1 | Server WebTransport echo (Rust, wtransport) |
 | `s2-webrtc-server/` | S2 | Server WebRTC ICE-lite (C++, libdatachannel) |
 | `web/` | S1, S2, S4 | Test Playwright với Chromium thật |
 
@@ -40,3 +41,5 @@ Môi trường tự động chỉ có Chromium. Trên máy có Firefox/Safari:
 2. Mở `http://localhost:8080/s2.html`, mở DevTools console, gõ `await runS2(7101)` (kết nối thẳng) và `await runS2(4443)` (qua relay).
 3. Kết quả mong đợi: `{ufragLen: 80, reliableEcho: 'hello-reliable', unreliableEcho: 'hello-unreliable'}`.
 4. Ghi kết quả vào bảng "Chạy tay" của mục S2 trong `docs/superpowers/spikes/2026-10-21-sp0-findings.md`.
+
+S1 (WebTransport): mở `http://localhost:8080/s1.html` rồi gõ `await runS1(7102)` (thẳng) và `await runS1(4443)` (qua relay). Trình duyệt cần map `*.wt.test` về `127.0.0.1` (ví dụ dùng dnsmasq) và **không** dùng proxy HTTP.

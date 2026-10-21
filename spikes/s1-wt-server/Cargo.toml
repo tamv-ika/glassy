@@ -1,0 +1,9 @@
+[package]
+name = "s1-wt-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+tokio = { version = "1.54.0", features = ["full"] }
+wtransport = "0.7.2"

@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>S1 WebTransport via SNI ticket</title>
+  <script src="common.js"></script>
+  <script>
+    function hexToBytes(hex) {
+      return new Uint8Array(hex.match(/../g).map((b) => parseInt(b, 16)));
+    }
+
+    async function readAll(readable) {
+      const reader = readable.getReader();
+      const chunks = [];
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(...value);
+      }
+      return new TextDecoder().decode(new Uint8Array(chunks));
+    }
+
+    async function echoDatagram(wt, text) {
+      const reader = wt.datagrams.readable.getReader();
+      const writer = wt.datagrams.writable.getWriter();
+      await writer.write(new TextEncoder().encode(text));
+      const { value } = await withTimeout(reader.read(), 5000, 'datagram echo');
+      reader.releaseLock();
+      writer.releaseLock();
+      return new TextDecoder().decode(value);
+    }
+
+    async function echoStream(wt, text) {
+      const stream = await wt.createBidirectionalStream();
+      const writer = stream.writable.getWriter();
+      await writer.write(new TextEncoder().encode(text));
+      await writer.close();
+      return withTimeout(readAll(stream.readable), 5000, 'stream echo');
+    }
+
+    // Connects to the ticket hostname (spec §3.6); `port` selects the server or the gateway.
+    window.runS1 = async function runS1(port) {
+      const ci = await loadConnectInfo();
+      const url = `https://${ci.webtransport.host}:${port}${ci.webtransport.path}`;
+      const wt = new WebTransport(url, {
+        serverCertificateHashes: [{ algorithm: 'sha-256', value: hexToBytes(ci.webtransport.cert_sha256) }],
+      });
+      await withTimeout(wt.ready, 10000, 'WebTransport ready');
+      const result = {
+        datagramEcho: await echoDatagram(wt, 'ping-dgram'),
+        streamEcho: await echoStream(wt, 'ping-stream'),
+      };
+      wt.close();
+      return result;
+    };
+  </script>
+</head>
+<body>S1</body>
+</html>

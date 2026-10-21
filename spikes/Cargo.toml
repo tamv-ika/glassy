@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["gw-proto"]
+members = ["gw-proto", "s1-wt-server"]
 # cap-probe is built standalone on remote hosts (see bench/aws), so it is not a member.
 exclude = ["cap-probe"]
 

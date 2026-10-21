@@ -10,7 +10,36 @@ Mỗi mục gồm: **Câu hỏi / Bằng chứng / Kết luận / Việc cho sub
 
 ## S1 — WebTransport với ticket trong SNI
 
-_Chưa chạy._
+**Câu hỏi:** Browser có chấp nhận URL dạng hostname dài (ticket base32, 2 nhãn × 48 ký tự) kèm `serverCertificateHashes` mà **không kiểm tên trong cert** không? Gateway có đọc được SNI từ gói Initial thật của browser (ClientHello có thể trải nhiều gói, CRYPTO bị xáo thứ tự) không?
+
+**Bằng chứng:**
+- `cd spikes/web && npx playwright test s1` → **3 passed**:
+  - `S1 direct`: Chromium → `s1-wt-server` (crate `wtransport`). Cert có SAN = `localhost`, còn hostname là `<ticket>.<ticket>.wt.test`. Echo được cả datagram lẫn bidi stream.
+  - `S1 via gw-proto SNI`: Chromium → relay (giải mã Initial, đọc SNI, mở ticket, route) → server. Echo được cả hai.
+  - `S1 capture`: bắt được 4 datagram Initial thật vào `spikes/gw-proto/tests/fixtures/chromium/`.
+- `cargo nextest run -p gw-proto --test chromium_fixture --no-capture` → pass. Output:
+  ```
+  datagram 0: 1250 bytes, pn 1, PING PADDING PING PADDING CRYPTO@112+53 PING CRYPTO@0+51 CRYPTO@51+61 PING CRYPTO@165+217 PING PADDING PING
+  client_hello_datagrams = 1
+  client_hello_total_len = 382, datagrams_for_full_hello = 1
+  ```
+
+**Kết luận: ĐẠT trên Chromium 141.** Không cần dùng fallback port mapping.
+- Chromium **không kiểm SAN** khi dùng `serverCertificateHashes`: cert `localhost` vẫn được chấp nhận cho hostname ticket.
+- Hostname 96 ký tự (2 nhãn base32) chạy được, và ticket trong SNI được relay mở thành công.
+- **Đã quan sát được "chaos protection":** frame CRYPTO trong một gói bị xáo thứ tự (@112 đứng trước @0) và xen kẽ PING/PADDING. Bộ gom theo offset xử lý đúng.
+- Với bản Chromium này, ClientHello chỉ dài 382 byte và nằm gọn trong **1 datagram**: capture không có key share hậu lượng tử (ML-KEM). Khi PQ được bật, ClientHello sẽ dài khoảng 1.2KB trở lên và trải ra 2 datagram. Relay đã xử lý được trường hợp này (test `split_client_hello_two_packets_out_of_order_routes` với gói tự dựng).
+- **Phát hiện về môi trường:** khi Chromium kế thừa `HTTPS_PROXY`, nó **không gửi gói UDP nào** cho WebTransport, và lỗi trả về chỉ là `Opening handshake failed`. Phải chạy với `--no-proxy-server`. Ngoài thực tế, người chơi ngồi sau proxy HTTP bắt buộc sẽ không dùng được WebTransport, nên đây thêm một lý do để giữ WebRTC làm fallback.
+
+**Việc cho sub-project sau:**
+- **SP5:** gateway parse SNI như prototype: lấy SNI ngay khi đọc được từ phần liền mạch, không cần chờ đủ ClientHello. Cần test lại với Chrome có bật ML-KEM.
+- **SP4/SP5:** backend HTML5 cần phân biệt lỗi `Opening handshake failed` để chuyển sang WebRTC.
+- **Chạy tay (chưa làm):**
+
+  | Browser | Kết quả |
+  |---|---|
+  | Firefox | chưa chạy |
+  | Safari | chưa chạy |
 
 ---
 

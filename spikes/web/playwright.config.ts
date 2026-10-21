@@ -11,8 +11,12 @@ export default defineConfig({
     browserName: 'chromium',
     launchOptions: {
       executablePath: process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium',
-      // Resolve every ticket hostname to the local gateway without real DNS.
-      args: ['--host-resolver-rules=MAP *.wt.test 127.0.0.1'],
+      args: [
+        // Resolve every ticket hostname to the local gateway without real DNS.
+        '--host-resolver-rules=MAP *.wt.test 127.0.0.1',
+        // Chromium otherwise inherits HTTPS_PROXY and never sends WebTransport's UDP packets.
+        '--no-proxy-server',
+      ],
     },
   },
   webServer: {
