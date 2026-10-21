@@ -78,7 +78,28 @@ Các điểm khác đã được xác nhận:
 
 ## S3 — Khả năng XDP/AF_XDP của ENA
 
-_Chưa chạy._
+**Câu hỏi:** Trên AWS (driver ENA), node chạy được những mode nào: XDP native, XDP generic, AF_XDP copy, AF_XDP zero-copy? Cần kernel, MTU và số queue ra sao?
+
+### Phần chạy trên veth (container, đã chạy)
+
+**Bằng chứng:** `cd spikes/cap-probe && make -C bpf && cargo build --release && tests/veth_test.sh` (chạy với quyền root) → pass:
+```json
+{"afxdp_copy":{"error":null,"ok":true},
+ "afxdp_zerocopy":{"error":"bind: Operation not supported (os error 95)","ok":false},
+ "btf":true,"channels":{"combined":null,"max_combined":null},"driver":"veth",
+ "kernel":"6.18.44-fc-v139","mtu":1500,
+ "xdp_generic":{"error":null,"ok":true},"xdp_native":{"error":null,"ok":true}}
+```
+`xdp_reflect.o` gửi lại được gói UDP tới port 9 ở cả mode generic lẫn native.
+
+**Bài học cho detector (SP2) và data plane:**
+- **Probe AF_XDP phải chờ queue được giải phóng.** Kernel giải phóng queue của socket AF_XDP đã đóng một cách bất đồng bộ. Nếu bind ngay sau một probe khác trên cùng queue, kernel trả `EBUSY` thay vì kết quả thật (với veth, kết quả thật là `EOPNOTSUPP`). `cap-probe` bind lại khi gặp `EBUSY`, mỗi lần cách 50ms, tối đa 40 lần. Detector của SP2 cũng phải làm vậy, nếu không sẽ báo sai rằng zero-copy "bận".
+- **Gói có checksum partial:** trên veth, gói do chính host gửi đi ở dạng `CHECKSUM_PARTIAL` (TX offload). XDP native làm mất metadata này, nên gói bị XDP_TX gửi lại sẽ hỏng checksum (`UdpInCsumErrors` tăng). Gói từ NIC thật mang checksum đầy đủ nên không bị ảnh hưởng. Tuy vậy, nếu sau này gateway gắn XDP lên veth (ví dụ để bắt traffic từ pod trên cùng node), nó phải tính lại checksum thay vì cập nhật tăng dần.
+- **XDP_TX native trên veth** chỉ tới được peer khi peer cũng có chương trình XDP (để bật NAPI). Điều này chỉ ảnh hưởng tới test, không ảnh hưởng tới ENA.
+
+### Phần chạy trên AWS (ENA)
+
+_Chưa chạy. Người dùng chạy theo `bench/aws/` (Task 14)._
 
 ---
 

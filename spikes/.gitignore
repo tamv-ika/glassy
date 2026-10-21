@@ -5,3 +5,4 @@ node_modules/
 test-results/
 playwright-report/
 web/pages/connect.json
+cap-probe/bpf/*.o
