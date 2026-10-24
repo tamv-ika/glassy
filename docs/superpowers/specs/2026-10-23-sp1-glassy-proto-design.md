@@ -1,7 +1,7 @@
 # SP1 — `glassy-proto`: wire format, golden vectors, crate Rust, lib C++
 
 - **Ngày:** 2026-10-23
-- **Trạng thái:** Draft, chờ review
+- **Trạng thái:** Đã duyệt
 - **Spec cha:** `docs/superpowers/specs/2026-10-21-glassy-architecture-design.md` (gọi tắt là **spec kiến trúc**). Các mục `§x` không ghi rõ nguồn là của spec kiến trúc.
 - **Tham chiếu đã đọc source:** netcode, reliable.io, yojimbo (mas-bandwidth), KCP (skywind3000), GameNetworkingSockets (Valve). Bảng so sánh ở §11.
 
@@ -9,6 +9,7 @@ Ký hiệu nguồn quyết định trong spec này:
 - **[người dùng]**: người dùng đã chốt trong buổi brainstorm.
 - **[kiến trúc]**: lấy nguyên từ spec kiến trúc.
 - **[Claude]**: Claude tự quyết; người dùng có thể bác khi review.
+- **[Claude, khi hiện thực]**: quyết định phát sinh lúc hiện thực Rust và C++; cả hai ngôn ngữ đã làm đúng như ghi và golden vectors khoá lại.
 
 ---
 
@@ -102,6 +103,8 @@ body = server_id(16) | session_id(8) | expiry(u32, unix giây) | transports(1) |
 
 **Receiver obligations (gateway):** độ dài đúng 60 (trước khi decode base64/base32: ufrag đúng 80 ký tự, hai nhãn SNI đúng 48 ký tự); `ver` = 1; `key_id` có trong key ring; AEAD hợp lệ; `expiry` ≥ now; `flags` = 0; transport của gói nằm trong `transports`; với native, `session_id` trong ticket = `session_id` trong header `CONNECT`; `server_id` có trong bảng GS ở trạng thái route được (§5.2 kiến trúc; kiểm tra này thuộc gateway SP2, ghi ở đây cho đủ).
 
+**Thứ tự kiểm tra** [Claude, khi hiện thực]: độ dài → `ver` → `key_id` → AEAD → `flags` và bit reserved của `transports` (`reserved_nonzero`) → `expiry` < now (`expired`) → transport của gói không nằm trong `transports` (`bad_transport`) → `session_id` không khớp (`session_mismatch`). Mã lỗi nào cũng trả về theo thứ tự này, nên hai ngôn ngữ cho cùng một mã với cùng một input.
+
 ### 3.2 Server ticket (game server đọc) — đổi so với spec kiến trúc
 
 ```
@@ -124,6 +127,8 @@ body = user_id_len(1) | user_id(1..64, UTF-8)
 
 **Receiver obligations (game server):** độ dài trong [75, 458]; `ver` = 1; `key_id` đã biết; AEAD hợp lệ; `user_id_len` trong [1, 64] và `user_id` là UTF-8 hợp lệ; `server_id` = UID GameServer của chính nó; `expiry` ≥ now; `transport` là đúng một bit đã định nghĩa và khớp transport nhận ticket; có key native khi và chỉ khi `transport` = native; `metadata_len` ≤ 256; tổng độ dài các trường khớp đúng độ dài body (không thừa, không thiếu).
 
+**Thứ tự kiểm tra** [Claude, khi hiện thực]: độ dài [75, 458] → `ver` → `key_id` → AEAD → parse body theo thứ tự byte: `user_id_len` ∈ [1, 64] (`bad_user_id`) → thiếu byte (`bad_length`) → `transport` ∈ (1, 2, 4) (`bad_transport`) → key native (nếu native) → `metadata_len` ≤ 256 (`bad_metadata`) → phần còn lại đúng bằng `metadata_len` (`bad_length`) → `user_id` là UTF-8 theo RFC 3629 (`bad_user_id`) → `server_id` (`wrong_server`) → `expiry` < now (`expired`) → `transport` ≠ transport nhận ticket (`bad_transport`).
+
 ### 3.3 ICE pwd — giữ nguyên spike
 
 ```
@@ -142,6 +147,7 @@ tag   = HMAC-SHA256_K_retry_gw( byte0 | ODCID | expiry | ip16(client) | port(u16
 - Gateway (Rust): mint + validate (đã có trong spike, chuyển vào crate).
 - Game server (C++): **chỉ parse**: kiểm `bit7 = 0`, `ODCIL ∈ [8, 20]`, độ dài = 1 + ODCIL + 8 + 16, rồi lấy ODCID. Không kiểm tag (không có key, §3.6 kiến trúc).
 - Vector đã có: `spikes/vectors/retry_token.json`.
+- [Claude, khi hiện thực] Các kiểm tra cấu trúc dùng chung cho cả parse (game server) và validate (gateway), theo thứ tự: rỗng → `bad_length`; `bit7` = 1 → `bad_token_type`; ODCIL ∉ [8, 20] → `bad_odcil`; độ dài ≠ 1 + ODCIL + 8 + 16 → `bad_length`. Validate kiểm thêm **tag trước, hạn sau**: tag sai → `auth_failed`; `now` > `expiry` → `expired`. Làm vậy để token giả không dò được hạn.
 
 ### 3.5 `ConnectInfo`
 
@@ -175,6 +181,16 @@ Broker tạo, Nakama chuyển nguyên vẹn, client đọc. Đi trong `SessionIn
 
 - Mỗi khối transport là **tuỳ chọn**: broker chỉ đưa vào những transport mà fleet bật.
 - Trường lạ: decoder **bỏ qua** (để broker thêm trường mà không phá client cũ). `v` khác 1: từ chối.
+- **Quy tắc decode** [Claude, khi hiện thực], theo đúng thứ tự (lỗi đầu tiên thắng; Rust và C++ phải cho cùng mã):
+  1. Chuỗi base64url tối đa **5462** ký tự và decode nghiêm ngặt (không padding, không ký tự lạ, bit thừa = 0), dài hơn → `too_large`, sai → `bad_encoding`.
+  2. JSON tối đa **4096** byte (`too_large`).
+  3. Độ sâu lồng nhau tối đa **8**; quét ngoài chuỗi ký tự (`bad_json`).
+  4. Toàn bộ tài liệu là UTF-8 hợp lệ (`bad_json`).
+  5. Toàn bộ tài liệu là JSON hợp lệ theo RFC 8259, kể cả phần ngoài các trường đã biết: rác phía sau bị từ chối; escape `\ud800` đứng một mình được chấp nhận; số rất lớn trong trường lạ được chấp nhận (`bad_json`).
+  6. `v` ở top-level được kiểm **trước mọi trường khác**: thiếu hoặc không phải token số nguyên → `bad_json`; số nguyên ≠ 1 → `bad_version`. Nhờ vậy phiên bản tương lai có schema mới vẫn nhận mã `bad_version` thay vì lỗi của trường.
+  7. Trường đã biết: trùng key đã biết → `bad_json`; trùng key lạ thì bỏ qua; key có chứa escape không bao giờ khớp tên đã biết; trường chuỗi đã biết không được chứa escape.
+  8. Kiểm giá trị: `session_id` 16 hex chữ thường; có ít nhất một khối transport; `gateways` và `candidates` có 1..4 phần tử, mỗi phần tử 1..64 byte; `routing_ticket` 60 byte; `server_ticket` native [139, 458], WebRTC [75, 394]; `key_c2s`, `key_s2c`, `cert_sha256` 32 byte; `ice_ufrag` 80 và `ice_pwd` 43 ký tự thuộc bảng base64 std (bit thừa của `ice_pwd` **không** kiểm); `dtls_fingerprint` 1..128 ký tự ASCII in được; `url` 1..1024 byte (`bad_length`) và bắt đầu bằng `https://` (`bad_encoding`); `expiry` là u32 bất kỳ, kể cả 0.
+  9. Kiểu giá trị sai (ví dụ `null`) hoặc thiếu trường của một khối transport → `bad_json`; thứ tự kiểm giá trị theo thứ tự trong tài liệu (`session_id`, `native`, `webrtc`, `webtransport`). Decoder C++ không cấp phát động (có test đếm allocation).
 - Kích thước: JSON ≤ **4096 byte** trước base64 [Claude]. Với ticket lớn nhất và cả 3 transport, JSON khoảng 2.6KB, nên 4096 còn dư. Decoder C++ từ chối JSON lớn hơn trước khi parse. SP2 phải kiểm chứng Nakama thật chấp nhận `SessionId` dài cỡ ~5.5KB (4096 byte sau base64); spike S5 mới thử tới ~1.5KB.
 - **Go không parse `ConnectInfo`** [Claude]: broker trả về sẵn chuỗi base64url cho từng player; `glassy-nakama` chỉ đặt chuỗi đó vào `SessionId`. Như vậy D13 giữ nguyên: Go không biết gì về format.
 - Parser JSON phía C++ là một parser tối giản, có trần độ sâu và độ dài, không cấp phát động ngoài buffer cố định. Không kéo thư viện JSON lớn vào client [Claude].
@@ -208,10 +224,11 @@ Nguyên tắc: **mỗi bên tự bảo đảm tính duy nhất của nonce mà n
 - Chiều S→C: server sinh `server_nonce` nên tự bảo đảm duy nhất. Chiều C→S: client chỉ dùng `server_nonce` của một `ACCEPT` hợp lệ trả lời đúng `CONNECT` đang chờ của nó (AAD của `ACCEPT` ràng buộc `conn_id`, §4.3), nên kẻ tấn công không ép được client dùng lại một `server_nonce` cũ.
 - `pn` là bộ đếm 64 bit **riêng cho mỗi chiều và mỗi kết nối**, giá trị 0 dành cho `ACCEPT`/`REJECT` (S→C) và không dùng ở C→S; gói `DATA` đầu tiên của mỗi chiều dùng `pn` = 1. Mỗi gói gửi đi (kể cả keepalive và gói chứa dữ liệu gửi lại) dùng một `pn` mới, tăng dần.
 - Vì mỗi kết nối có `server_nonce` mới, `pn` bắt đầu lại khi resume mà **không dùng lại nonce**, kể cả khi client restart rồi dùng lại `ConnectInfo`.
-- Trên wire, `pn` được gửi dưới dạng **4 byte thấp**; bên nhận dựng lại 64 bit theo thuật toán RFC 9000 Appendix A.3, dựa trên `pn` lớn nhất đã xác thực trong kết nối đó.
+- Trên wire, `pn` được gửi dưới dạng **4 byte thấp**; bên nhận dựng lại 64 bit theo thuật toán RFC 9000 Appendix A.3, dựa trên `pn` lớn nhất đã xác thực trong kết nối đó. [Claude, khi hiện thực] Dùng `pn_nbits` = 32 và điều kiện chặn `candidate < 2^62 − 2^32` (so sánh **chặt**); hiện thực phải tránh underflow số không dấu khi `largest` nhỏ.
+- [Claude, khi hiện thực] **Bên gửi từ chối `pn` = 0** ở `DATA` và `DISCONNECT` (sẽ dùng lại nonce `server_nonce | 0⁸` của `ACCEPT`/`REJECT` dưới `key_s2c`). `seal_data` kiểm `frames` > 1171 byte (`too_large`) **trước** khi kiểm `pn` = 0.
 - **Một `pn` duy nhất cho cả AEAD, chống replay và ack** [người dùng]: frame `ACK` (§5.2) tham chiếu chính `pn` này; không có seq thứ hai.
 
-**Chống replay** (theo netcode): bên nhận giữ cửa sổ 256 `pn` gần nhất. Gói có `pn` < `largest − 256` bị drop; gói có `pn` đã nhận bị drop. Chỉ cập nhật cửa sổ **sau khi** AEAD hợp lệ.
+**Chống replay** (theo netcode): bên nhận giữ cửa sổ đúng 256 `pn`, tức (`largest` − 256, `largest`]. Gói có `pn` + 256 ≤ `largest` bị drop (`too_old`); gói có `pn` đã nhận bị drop (`replayed`); `pn` = 0 luôn bị drop (`replayed`, vì 0 dành cho `ACCEPT`/`REJECT`). Chỉ cập nhật cửa sổ **sau khi** AEAD hợp lệ. [Claude, khi hiện thực]
 
 **Định danh kết nối:** header `DATA` không mang định danh kết nối; server phân biệt kết nối bằng cách thử giải mã. Quy tắc giữ và chọn kết nối là hành vi session (§4.7, SP2).
 
@@ -237,6 +254,8 @@ Nguyên tắc: **mỗi bên tự bảo đảm tính duy nhất của nonce mà n
 
 **Receiver obligations — gateway:** độ dài trong [251, 1200]; `ver` = 1; routing ticket hợp lệ theo §3.1 với transport native và `session_id` khớp; `server_ticket_len` trong [139, 458] và không vượt quá phần còn lại. Gateway **không** kiểm `proof_tag` (không có session key).
 
+**Thứ tự kiểm tra** [Claude, khi hiện thực]: *gateway (parse)*: độ dài [251, 1200] → loại gói → `ver` → `server_ticket_len` ∈ [139, 458] và vừa trong gói. *Game server (verify, sau parse)*: padding toàn 0 (`bad_padding`) → mở server ticket (qua phần native, §3.2) → `session_id` khớp (`session_mismatch`) → `proof_tag` (`auth_failed`). `build_connect` cũng từ chối server ticket ngoài [139, 458].
+
 **Receiver obligations — game server:** như gateway về độ dài, `ver` và `server_ticket_len` (không mở routing ticket); trailer có `family` = `0x04` và `reserved` = 0 khi nguồn là gateway; server ticket hợp lệ theo §3.2 với transport native, `session_id` khớp header; `proof_tag` hợp lệ với `key_c2s` trong ticket; padding toàn 0. **Phần của SP1 dừng ở đây:** lib trả về một `CONNECT` đã xác thực (`session_id`, `conn_id`, `connect_seq`, nội dung server ticket). Việc gửi `ACCEPT` hay `REJECT` là quyết định của session layer (§4.7, SP2).
 
 ### 4.3 `ACCEPT` (S→C)
@@ -249,6 +268,7 @@ body  = flags(1) [bit0 = resumed] | reserved(1)=0 | server_time_ms(u64)
 ```
 
 - Client biết `CONNECT` nào được trả lời nhờ `connect_seq` (client giữ ánh xạ `connect_seq → conn_id` cho tối đa **4** `CONNECT` đang chờ). Đưa `conn_id` vào AAD ràng buộc `ACCEPT` với đúng `CONNECT` đó: một `ACCEPT` cũ bị phát lại không khớp `conn_id` nào đang chờ.
+- [Claude, khi hiện thực] **Peek một phản hồi** (client chưa biết là `ACCEPT` hay `REJECT`): độ dài ∉ {58, 59} → `bad_length`; sau đó loại gói phải khớp độ dài (59 ↔ `0x81` `ACCEPT`, 58 ↔ `0x84` `REJECT`), nếu không `bad_type`. Bit flag reserved và byte `reserved` của `ACCEPT` ≠ 0 → `reserved_nonzero`, kiểm **sau** AEAD.
 - Kích thước cố định 1+8+8+16+10+16 = **59 byte**, nhỏ hơn `CONNECT` tối thiểu (251). Không thể dùng để khuếch đại.
 
 ### 4.4 `DATA` (hai chiều)
@@ -259,6 +279,7 @@ AAD = 13 byte header
 ```
 
 - Overhead cố định: 13 + 16 = **29 byte**. Plaintext frames ≤ 1200 − 29 = **1171 byte**.
+- [Claude, khi hiện thực] `seal_data` từ chối `pn` = 0 (§4.1).
 - Keepalive = `DATA` có thể không chứa frame nào, hoặc chỉ chứa `ACK` (§5).
 - `session_id` giữ trong header theo spec kiến trúc: game server tra session bằng `session_id`, không dựa vào địa chỉ nguồn.
 
@@ -271,6 +292,7 @@ AAD = 13 byte header
 ```
 
 - `reason`: `0x00` bình thường, `0x01` server shutdown, `0x02` bị kick, `0x03` protocol error; giá trị khác hợp lệ nhưng coi như `0x00`.
+- [Claude, khi hiện thực] `seal_disconnect` từ chối `pn` = 0 (§4.1).
 - Chỉ gửi trong một kết nối đã `ACCEPT`. Nhận được `DISCONNECT` hợp lệ: đóng session ngay, không vào GRACE.
 
 ### 4.6 `REJECT` (S→C) [Claude, sau review]
@@ -350,6 +372,8 @@ Có **hai tập `pn` khác nhau** ở bên nhận:
   - Việc kiểm các trần này nằm trong bộ ghép stream (SP2); SP1 chỉ chốt giá trị và ý nghĩa.
   - **Hằng số của protocol `ver` = 1, không cấu hình** (hai bên không thể lệch nhau, vì không quảng bá trên wire): `RECV_WINDOW` = **512 KiB**, `MAX_MESSAGE` = **256 KiB**. Muốn đổi thì tăng `ver`.
 
+**Quy tắc decode frame** [Claude, khi hiện thực]: decode trả về **lỗi đầu tiên theo thứ tự byte**. `DATAGRAM` có `len` > 1100 → `too_large`, kiểm **trước** khi kiểm dữ liệu bị cắt. `STREAM` có `offset + len` > 2^62 − 1 → `value_too_large`, cũng kiểm trước khi kiểm dữ liệu bị cắt. `ACK` thứ hai → `duplicate_ack`, báo tại byte loại của nó. `STREAM` và `DATAGRAM` có độ dài 0 là hợp lệ.
+
 Codec frame thuộc SP1. Logic **dùng** các frame này (khi nào gửi `ACK`, khi nào gửi lại byte nào, pacing) thuộc SP2.
 
 ---
@@ -377,6 +401,7 @@ Codec frame thuộc SP1. Logic **dùng** các frame này (khi nào gửi `ACK`, 
 
 - Server ticket đi trong path của extended CONNECT: `/glassy?t=<base64url server ticket>` (§3.6 kiến trúc). Ticket WT không có key native, dài tối đa 394 byte, nên path dài nhất là `/glassy?t=` + 526 ký tự.
 - Trần message reliable giống native (`MAX_MESSAGE` = 256 KiB).
+- [Claude, khi hiện thực] **Thứ tự parse path:** path dài hơn 536 byte → `too_large`; không có tiền tố `/glassy?t=` hoặc có `&` hay `#` → `bad_encoding`; base64url lỗi → `bad_encoding`; ticket ∉ [75, 394] byte → `bad_length` (với ticket dài thì không tới được vì trần path đã chặn trước).
 
 ### 6.3 Phía HTML5 [Claude, sau review]
 
@@ -396,6 +421,40 @@ Codec frame thuộc SP1. Logic **dùng** các frame này (khi nào gửi `ACK`, 
 - Danh sách tối thiểu: `routing_ticket.json`, `server_ticket.json`, `ice_pwd.json`, `retry_token.json`, `connect_info.json`, `native_packets.json` (`CONNECT`/`ACCEPT`/`DATA`/`DISCONNECT`/`REJECT`, dựng lại `pn`, cửa sổ replay), `frames.json` (`ACK`/`STREAM`/`DATAGRAM`, varint canonical), `wt_framing.json`.
 - Rust test sinh vectors; Rust test khác đọc lại để kiểm tra; C++ test (GoogleTest) đọc cùng file. Mã lỗi được đặt tên giống nhau ở hai ngôn ngữ (ví dụ `bad_version`, `auth_failed`, `expired`, `non_canonical_varint`) để so sánh được.
 - Vectors cho thuật toán chuẩn lấy known-answer từ RFC (XChaCha20-Poly1305 từ draft-irtf-cfrg-xchacha, AES-128-GCM, HKDF RFC 5869, HMAC-SHA256 RFC 4231, varint RFC 9000 §16) và chép vào `tests/fixtures/*.hex` theo CONVENTIONS.
+
+### 7.1 Bảng mã lỗi [Claude, khi hiện thực]
+
+27 mã, chuỗi snake_case giống hệt ở Rust (`crates/glassy-proto/src/error.rs`, `Error::code()`) và C++. Vectors so sánh bằng chuỗi này.
+
+| Mã | Ý nghĩa |
+|---|---|
+| `truncated` | Input kết thúc giữa chừng một trường. |
+| `bad_length` | Độ dài sai (ngoài khoảng cho phép, không khớp trường, hoặc thiếu byte). |
+| `bad_type` | Byte loại gói không đúng với ngữ cảnh. |
+| `bad_version` | `ver` hoặc `v` không được hỗ trợ. |
+| `unknown_key` | `key_id` không có trong key ring. |
+| `auth_failed` | AEAD, `proof_tag` hoặc tag token không hợp lệ. |
+| `expired` | `expiry` đã qua so với now. |
+| `reserved_nonzero` | Bit hoặc byte reserved khác 0. |
+| `bad_transport` | Transport không hợp lệ, không được phép hoặc không khớp. |
+| `session_mismatch` | `session_id` không khớp giữa các thành phần. |
+| `wrong_server` | `server_id` trong ticket không phải của game server này. |
+| `bad_user_id` | `user_id` có độ dài sai hoặc không phải UTF-8. |
+| `bad_metadata` | `metadata_len` vượt 256. |
+| `bad_padding` | Padding của `CONNECT` có byte khác 0. |
+| `bad_trailer` | Trailer `client_addr` sai. |
+| `non_canonical_varint` | Varint không ở dạng ngắn nhất. |
+| `value_too_large` | Giá trị vượt giới hạn số học (ví dụ offset + len > 2^62 − 1). |
+| `too_large` | Gói, message hoặc path vượt trần kích thước. |
+| `duplicate_ack` | Có hơn một frame `ACK` trong gói. |
+| `non_canonical_ack` | `ACK` không ở dạng canonical (gửi byte `0xFF`, hoặc mask không khớp). |
+| `bad_token_type` | Token Retry có `bit7` = 1. |
+| `bad_odcil` | ODCIL của token Retry ngoài [8, 20]. |
+| `bad_encoding` | Base64, UTF-8, tiền tố hay ký tự không hợp lệ. |
+| `bad_json` | `ConnectInfo` không phải JSON hợp lệ hoặc vi phạm cấu trúc. |
+| `too_old` | `pn` rơi ra ngoài cửa sổ replay (`pn` + 256 ≤ `largest`). |
+| `replayed` | `pn` đã nhận, hoặc `pn` = 0. |
+| `buffer_too_small` | Chỉ encoder trả về: buffer đầu ra quá nhỏ. |
 
 ---
 
@@ -441,7 +500,7 @@ vectors/                   ← golden vectors (JSON)
 | Differential | một CLI nhỏ ở mỗi ngôn ngữ đọc bytes, in kết quả decode dạng JSON canonical; CI chạy cả hai trên corpus fuzz chung và so sánh từng dòng | |
 | Property | roundtrip encode → decode cho mọi frame và gói (proptest) | |
 
-CI (`.github/workflows/proto.yml`): fmt, clippy `-D warnings`, nextest, build C++ với `-Wall -Wextra -Werror`, ctest, build Emscripten + chạy vectors dưới Node (§6.3), đo kích thước `glassy_proto_core`, fuzz smoke 60 giây cho mỗi target, differential trên corpus. Giới hạn song song theo CONVENTIONS §3.
+CI (`.github/workflows/proto.yml`): fmt, clippy `-D warnings`, nextest, build C++ với `-Wall -Wextra -Werror`, ctest, build Emscripten + chạy vectors dưới Node (§6.3), đo kích thước `glassy_proto_core` (hiệu `text + data` của `size -B` giữa `size_probe` và `size_baseline`, luôn build MinSizeRel nên không phụ thuộc build type; chạy trên cả x86_64 và arm64), fuzz smoke 60 giây cho mỗi target, differential trên corpus. Giới hạn song song theo CONVENTIONS §3.
 
 ---
 

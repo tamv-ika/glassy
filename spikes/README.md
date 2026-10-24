@@ -50,3 +50,5 @@ Môi trường tự động chỉ có Chromium. Trên máy có Firefox/Safari:
 4. Ghi kết quả vào bảng "Chạy tay" của mục S2 trong `docs/superpowers/spikes/2026-10-21-sp0-findings.md`.
 
 S1 (WebTransport): mở `http://localhost:8080/s1.html` rồi gõ `await runS1(7102)` (thẳng) và `await runS1(4443)` (qua relay). S4 dùng cùng trang này: `await runS1(7103)` (thẳng tới ngtcp2) và `await runS1(4443)` sau khi chạy `beforeAll` của `web/tests/s4.spec.ts`. Trình duyệt cần map `*.wt.test` về `127.0.0.1` (ví dụ dùng dnsmasq) và **không** dùng proxy HTTP.
+
+> Vectors chính thức của SP1 nằm ở `vectors/` (gốc repo); `spikes/vectors/*.json` chỉ giữ lại như tham khảo của spike.

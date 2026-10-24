@@ -169,11 +169,14 @@ body          = server_id(16 = GameServer UID) | session_id(8) | expiry(4, unix 
 ### 3.3 Server ticket (game server đọc)
 
 ```
-ServerTicket = key_id(1) | nonce(12) | ChaCha20-Poly1305_K_gs( body ) | tag(16)
-body         = user_id(≤64) | session_id(8) | expiry(4) | transport(1)
+ServerTicket = ver(1) | key_id(1) | nonce(24) | XChaCha20-Poly1305_K_ticket( body ) | tag(16)
+K_ticket     = HKDF-SHA256(ikm = K_gs, salt = rỗng, info = "glassy-server-ticket", L = 32)
+body         = user_id_len(1) | user_id(1..64) | server_id(16) | session_id(8) | expiry(4) | transport(1)
              | [key_c2s(32) | key_s2c(32)]   (chỉ native)
-             | metadata(≤256, do Nakama truyền xuống)
+             | metadata_len(u16) | metadata(≤256, do Nakama truyền xuống)
 ```
+
+Đổi so với bản đầu (SP1, §3.2 của spec SP1): thêm `ver` và `server_id` (ticket chỉ hợp lệ trên đúng game server được cấp); XChaCha20-Poly1305 với nonce 24 byte; `K_gs` không dùng trực tiếp mà dẫn xuất `K_ticket` bằng HKDF; **mỗi player có một server ticket cho mỗi transport** (key native chỉ nằm trong ticket native). Chi tiết byte và thứ tự kiểm tra: `docs/superpowers/specs/2026-10-23-sp1-glassy-proto-design.md` §3.2.
 
 | Transport | Server ticket đi tới game server bằng cách nào |
 |---|---|
@@ -185,27 +188,30 @@ Với WebRTC và WT, ticket nằm trong kênh đã mã hoá nên không bị sni
 
 ### 3.4 Native UDP
 
-**Các loại gói** (byte đầu nằm trong dải `0x80–0xBF`; giá trị cụ thể chốt ở SP1):
+**Các loại gói** (byte đầu nằm trong dải `0x80–0xBF`; giá trị chốt ở SP1: `0x80` `CONNECT`, `0x81` `ACCEPT`, `0x82` `DATA`, `0x83` `DISCONNECT`, `0x84` `REJECT`, còn lại reserved, drop):
 
 | Loại | Hướng | Nội dung |
 |---|---|---|
-| `CONNECT` | C→S | `ver`, `session_id`, routing ticket, server ticket, `proof = AEAD_c2s(timestamp)`, padding |
-| `ACCEPT` | S→C | `AEAD_s2c(...)`; **kích thước ≤ `CONNECT`** (không thể bị dùng để khuếch đại) |
-| `DATA` | hai chiều | header `type | session_id(8) | seq` + `AEAD(payload)`, AAD = header. **Keepalive = `DATA` có payload rỗng** |
-| `DISCONNECT` | hai chiều | có AEAD |
+| `CONNECT` | C→S | `ver`, `session_id`, `conn_id` (ngẫu nhiên, mỗi lần gửi một giá trị mới), `connect_seq`, routing ticket, server ticket, `proof_tag` (tag AEAD_c2s của plaintext rỗng, nonce `conn_id|0⁸`), padding |
+| `ACCEPT` | S→C | `server_nonce` (16 byte, server sinh mới cho mỗi `ACCEPT`/`REJECT`) + `AEAD_s2c(...)`; AAD ràng buộc `conn_id`; **kích thước cố định 59 byte < `CONNECT`** (không thể bị dùng để khuếch đại) |
+| `DATA` | hai chiều | header `type | session_id(8) | pn_low(4)` + `AEAD(frames)`, AAD = header (13 byte). **Keepalive = `DATA` không có frame** |
+| `DISCONNECT` | hai chiều | `type | session_id(8) | pn_low(4)` + `AEAD(reason)` |
+| `REJECT` | S→C | `connect_seq`, `server_nonce` + `AEAD_s2c(reason | last_connect_seq)`; kích thước cố định 58 byte; chỉ gửi sau khi `CONNECT` qua toàn bộ kiểm tra crypto |
 
 ```
 client ──CONNECT──▶ gateway (slow path)
    kiểm routing ticket → server_id → tra bảng GS → cấp upstream port → tạo flow CHƯA XÁC NHẬN
    forward CONNECT + gắn thêm trailer client_addr (để game server biết IP thật của client)
-GS: bóc trailer → giải mã server ticket → lấy session key → kiểm proof (timestamp nằm trong cửa sổ cho phép
-    và tăng dần theo session, chống replay) → ACCEPT
+GS: bóc trailer → giải mã server ticket → lấy session key → kiểm proof_tag
+    (`connect_seq` phải lớn hơn hẳn giá trị đã chấp nhận gần nhất của session, không so với đồng hồ thật) → ACCEPT,
+    hoặc REJECT (ví dụ `stale_connect_seq`, kèm `last_connect_seq` để client nhảy lên trên)
 gateway: thấy có gói đi chiều về → flow ĐÃ XÁC NHẬN
 DATA: route theo 5-tuple trong fast path, không cần giải mã gì
 ```
 
-- Nonce AEAD được dựng từ `seq` cộng bit chỉ hướng. Kích thước chính xác của `seq` và header chốt ở SP1.
-- AEAD mặc định: ChaCha20-Poly1305 (RFC 8439). Client dùng Monocypher, server dùng GnuTLS/nettle.
+- Nonce AEAD 24 byte = `server_nonce(16) | pn(u64 BE)`; `pn` là bộ đếm riêng mỗi chiều và mỗi kết nối, trên wire chỉ gửi 4 byte thấp (bên nhận dựng lại theo RFC 9000 A.3). Cùng một `pn` dùng cho AEAD, chống replay (cửa sổ 256) và ack.
+- AEAD mặc định: XChaCha20-Poly1305 (nonce 24 byte), Monocypher ở cả client và server.
+- Hành vi session (tombstone, kết nối ứng viên, rate limit `REJECT`) thuộc SP2; xem §4.7 của spec SP1.
 
 ### 3.5 WebRTC (không cần signaling server)
 
@@ -470,9 +476,9 @@ Transport: UDP native │ WebRTC │ WebTransport
 
 | Channel | Native UDP | WebRTC | WebTransport |
 |---|---|---|---|
-| `reliable_ordered` | SDK tự làm ack + resend + chia mảnh | data channel ordered, reliable | một bidi stream, message có prefix độ dài |
+| `reliable` | native: byte stream có offset trong frame `STREAM` (SP1 §5.3), SDK tự làm ack + resend | data channel ordered, reliable | một bidi stream, message có prefix độ dài |
 | `unreliable` | gửi thẳng | data channel `ordered:false, maxRetransmits:0` | datagram |
-| `unreliable_sequenced` | `unreliable` + seq, lọc gói cũ ở session layer | như bên trái | như bên trái |
+| `unreliable_sequenced` | **để sau MVP** (MVP chỉ `reliable` và `unreliable`) | | |
 
 - Message `unreliable` tối đa khoảng 1100 byte (cấu hình được; lấy theo transport nhỏ nhất).
 - Lớp reliability của native nằm trong `glassy-proto` C++, dùng chung cho client và server.
@@ -513,7 +519,7 @@ hết GRACE → on_disconnect
 | Giữ ánh xạ NAT | **một socket suốt session**; keepalive mỗi 10s khi idle | WebRTC tự giữ nhờ ICE consent (RFC 7675); WT gửi datagram heartbeat |
 | Reconnect | quá ~2s không nhận được gói, hoặc game gọi `notify_network_changed()` → gửi lại `CONNECT`, có backoff | kết nối lại với cùng ConnectInfo |
 | Kích thước | **≤ 150KB**; build không exceptions, không RTTI, không iostream | gần như 0 |
-| Mã lỗi | `ticket_expired`, `auth_failed`, `server_unreachable`, `timeout` | như native |
+| Mã lỗi | `ticket_expired`, `auth_failed`, `server_unreachable`, `timeout`; nguồn của các lỗi bị từ chối là gói `REJECT` (SP1 §4.6) | như native |
 
 Bắt event đổi mạng của từng hệ điều hành (Android `ConnectivityManager`, iOS `NWPathMonitor`) nằm **ngoài** lõi SDK; game hoặc extension Defold gọi `notify_network_changed()`.
 
@@ -639,7 +645,6 @@ Không bao giờ dán key hay credential vào chat. Nếu sau này muốn Claude
 - Ràng buộc XDP và AF_XDP của ENA trên các instance mục tiêu, cùng pps nền (S3, chờ số liệu AWS).
 - Firefox và Safari: WT với ticket trong SNI, WebRTC không signaling, draft WT (S1, S2, S4, chạy tay).
 - Chromium bật ML-KEM: ClientHello trải 2 datagram qua Retry (relay đã có unit test, chưa thử với browser).
-- Giá trị byte cụ thể của các loại gói native, kích thước `seq` và header (SP1).
 
 ---
 
