@@ -1,0 +1,124 @@
+name: proto
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "cpp/**"
+      - "vectors/**"
+      - "scripts/**"
+      - ".github/workflows/proto.yml"
+  pull_request:
+    paths:
+      - "crates/**"
+      - "cpp/**"
+      - "vectors/**"
+      - "scripts/**"
+      - ".github/workflows/proto.yml"
+
+# Memory limits from CONVENTIONS.md section 3.
+env:
+  CARGO_BUILD_JOBS: "2"
+  NEXTEST_TEST_THREADS: "2"
+  CMAKE_BUILD_PARALLEL_LEVEL: "2"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo nextest run --workspace --profile ci
+      - run: cargo test --doc -p glassy-proto
+      - name: Regenerate vectors and require no diff
+        run: |
+          cargo nextest run -p glassy-proto --profile ci --run-ignored only -E 'test(/^write_/)'
+          git diff --exit-code vectors/
+
+  cpp:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nettle-dev clang-18 clang-format-18 xxd
+      - name: clang-format
+        run: |
+          find cpp/glassy-proto/src cpp/glassy-proto/include cpp/glassy-proto/tests \
+            cpp/glassy-proto/tools cpp/glassy-proto/fuzz \
+            \( -name '*.cc' -o -name '*.h' \) -print0 \
+            | xargs -0 clang-format-18 --dry-run -Werror
+      - name: Debug build and test
+        run: |
+          cmake -S cpp/glassy-proto -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel 2
+          ctest --test-dir build -j2 --timeout 120 --output-on-failure
+      - name: ASan and UBSan build and test
+        run: |
+          cmake -S cpp/glassy-proto -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DGLASSY_PROTO_SANITIZE=ON
+          cmake --build build-asan --parallel 2
+          ctest --test-dir build-asan -j2 --timeout 120 --output-on-failure
+
+  size:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # Always MinSizeRel: check_size.sh refuses any other build type.
+      - run: |
+          cmake -S cpp/glassy-proto -B build-size -DCMAKE_BUILD_TYPE=MinSizeRel \
+            -DGLASSY_PROTO_TESTS=OFF
+          cmake --build build-size --parallel 2 --target size_probe size_baseline
+          cpp/glassy-proto/tools/check_size.sh build-size
+
+  wasm:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 5.0.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: |
+          emcmake cmake -S cpp/glassy-proto -B build-wasm -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-wasm --parallel 2
+          ctest --test-dir build-wasm -j2 --timeout 120 --output-on-failure
+
+  fuzz-diff:
+    runs-on: ubuntu-24.04
+    needs: [rust, cpp]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nettle-dev clang-18 xxd
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install nightly --profile minimal
+      # The stable toolchain is too old for cargo-fuzz's lockfile.
+      - run: cargo +nightly install cargo-fuzz --locked
+      - name: Fuzz smoke (60 s per target)
+        run: scripts/fuzz_smoke.sh 60
+      - name: Build both decode CLIs
+        run: |
+          cargo build -p glassy-proto-cli
+          cmake -S cpp/glassy-proto -B build -DCMAKE_BUILD_TYPE=Release -DGLASSY_PROTO_TESTS=OFF
+          cmake --build build --parallel 2 --target glassy_proto_cli
+      - name: Differential over seeds and the fuzz corpus
+        run: scripts/differential.sh fuzz/seeds build-fuzz/corpus
