@@ -1,0 +1,121 @@
+{
+  "cases": [
+    {
+      "connect_session_id_hex": "0102030405060708",
+      "expect": {
+        "expiry": 2000000000,
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transports": 1
+      },
+      "name": "valid_native",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transports": 6
+      },
+      "name": "valid_webrtc_ufrag",
+      "now": 1900000000,
+      "sni": "aeayrceirceirceirceirca4gppztsh7wiibgccc5xwl5qge.hdgt2cmbxgpajyhgums6kpaqekyo2vqanwlnid2kehhjef6r.wt.example.test",
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e53c1022b0ed56006d96d40f4a21ce9217d1",
+      "ufrag": "AQGIiIiIiIiIiIiIiIgcM9+ZyP+yEBMIQu3svsDEOM09CYG5ngTg5qMl5TwQIrDtVgBtltQPSiHOkhfR",
+      "via": 2
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transports": 6
+      },
+      "name": "valid_wt_sni",
+      "now": 1900000000,
+      "sni": "aeayrceirceirceirceirca4gppztsh7wiibgccc5xwl5qge.hdgt2cmbxgpajyhgums6kpaqekyo2vqanwlnid2kehhjef6r.wt.example.test",
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e53c1022b0ed56006d96d40f4a21ce9217d1",
+      "ufrag": "AQGIiIiIiIiIiIiIiIgcM9+ZyP+yEBMIQu3svsDEOM09CYG5ngTg5qMl5TwQIrDtVgBtltQPSiHOkhfR",
+      "via": 4
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transports": 1
+      },
+      "name": "expiry_equals_now",
+      "now": 2000000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    },
+    {
+      "error": "expired",
+      "name": "expired_by_one",
+      "now": 2000000001,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    },
+    {
+      "error": "bad_length",
+      "name": "bad_length_59",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bd",
+      "via": 1
+    },
+    {
+      "error": "bad_version",
+      "name": "bad_version",
+      "now": 1900000000,
+      "ticket_hex": "02018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    },
+    {
+      "error": "unknown_key",
+      "name": "unknown_key",
+      "now": 1900000000,
+      "ticket_hex": "01028888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    },
+    {
+      "error": "auth_failed",
+      "name": "tampered_tag",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bded",
+      "via": 1
+    },
+    {
+      "error": "reserved_nonzero",
+      "name": "flags_nonzero",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23daa10675c4dab890337b68d40ef510cb9",
+      "via": 1
+    },
+    {
+      "error": "reserved_nonzero",
+      "name": "reserved_transport_bit",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325ea3c5ef11e3d22a5d205d82d3e524b0e16ce",
+      "via": 1
+    },
+    {
+      "error": "bad_transport",
+      "name": "transport_not_allowed",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 2
+    },
+    {
+      "connect_session_id_hex": "0909090909090909",
+      "error": "session_mismatch",
+      "name": "session_mismatch",
+      "now": 1900000000,
+      "ticket_hex": "01018888888888888888888888881c33df99c8ffb210130842edecbec0c438cd3d0981b99e04e0e6a325e23ce5bf8e8e5bc4a52dd2b7de1ce684bdec",
+      "via": 1
+    }
+  ]
+}
