@@ -68,9 +68,6 @@ Result<ServerTicket> open_server_ticket(std::span<const uint8_t> ticket, const S
                                         uint32_t now, const std::array<uint8_t, 16>& self_server_id,
                                         uint8_t via);
 
-// RFC 3629 UTF-8 validation: rejects overlong forms, surrogates and values above U+10FFFF.
-bool is_valid_utf8(std::span<const uint8_t> bytes);
-
 }  // namespace glassy::proto
 
 #endif  // GLASSY_PROTO_SERVER_TICKET_H_

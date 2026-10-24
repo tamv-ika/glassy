@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <string>
 
+#include "glassy/proto/utf8.h"
 #include "vectors.h"
 
 using namespace glassy::proto;
