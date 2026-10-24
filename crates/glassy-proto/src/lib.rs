@@ -4,6 +4,7 @@ pub mod connect_info;
 pub mod consts;
 pub mod crypto;
 pub mod error;
+pub mod frame;
 pub mod ice;
 pub mod packet;
 pub mod retry;

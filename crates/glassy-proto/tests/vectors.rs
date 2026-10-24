@@ -12,6 +12,7 @@ use glassy_proto::connect_info::{
     ConnectInfo, NativeInfo, WebRtcInfo, WtInfo, decode_connect_info, encode_connect_info,
 };
 use glassy_proto::crypto::{k_ticket, packet_nonce, xchacha_seal};
+use glassy_proto::frame::{Frame, decode_frames, encode_frame};
 use glassy_proto::ice::ice_pwd;
 use glassy_proto::packet::pn::{ReplayWindow, decode_pn};
 use glassy_proto::packet::{
@@ -27,7 +28,7 @@ use glassy_proto::routing_ticket::{
 use glassy_proto::server_ticket::{
     NativeKeys, ServerKeyRing, ServerTicket, open_server, seal_server,
 };
-use glassy_proto::{Error, transport};
+use glassy_proto::{Error, transport, varint};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------- routing_ticket.json
@@ -2578,6 +2579,240 @@ fn check_native_packets_vectors() {
                 c["expect"],
                 "{name}"
             ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------- frames.json
+
+const FR_FILE: &str = "frames.json";
+
+/// Frame spelled out independently of the codec so the vector file does not simply echo it.
+enum FrExpect {
+    Ack(u32, u16, u64),
+    Stream(u64, Vec<u8>),
+    Datagram(Vec<u8>),
+}
+
+struct FrCase {
+    name: &'static str,
+    plaintext: Vec<u8>,
+    result: Result<Vec<FrExpect>, Error>,
+}
+
+fn fr_varint(v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    varint::encode(v, &mut out).unwrap_or_else(|e| panic!("varint {v}: {e}"));
+    out
+}
+
+fn fr_ack_bytes(largest: u32, delay: u16, bits: u64) -> Vec<u8> {
+    let mut mask = 0u8;
+    let mut tail = Vec::new();
+    for i in 0..8 {
+        let b = (bits >> (8 * i)) as u8;
+        if b != 0xFF {
+            mask |= 1 << i;
+            tail.push(b);
+        }
+    }
+    let mut v = vec![0x01];
+    v.extend(largest.to_be_bytes());
+    v.extend(delay.to_be_bytes());
+    v.push(mask);
+    v.extend(tail);
+    v
+}
+
+fn fr_stream_bytes(offset: u64, data: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x02];
+    v.extend(fr_varint(offset));
+    v.extend(fr_varint(data.len() as u64));
+    v.extend(data);
+    v
+}
+
+fn fr_datagram_bytes(data: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x03];
+    v.extend(fr_varint(data.len() as u64));
+    v.extend(data);
+    v
+}
+
+fn fr_cases() -> Vec<FrCase> {
+    let cat = |parts: &[Vec<u8>]| parts.concat();
+    let sparse = 0xFFFF_FFFF_00FF_FE00u64;
+    let max = varint::MAX;
+    let mut dg_big_after_acks = fr_ack_bytes(7, 1, u64::MAX);
+    dg_big_after_acks.extend(fr_ack_bytes(8, 1, u64::MAX));
+    dg_big_after_acks.extend(fr_datagram_bytes(&[0x5a; 1101]));
+    vec![
+        FrCase {
+            name: "empty",
+            plaintext: vec![],
+            result: Ok(vec![]),
+        },
+        FrCase {
+            name: "ack_only",
+            plaintext: fr_ack_bytes(0x0102_0304, 0xFFFF, u64::MAX),
+            result: Ok(vec![FrExpect::Ack(0x0102_0304, 0xFFFF, u64::MAX)]),
+        },
+        FrCase {
+            name: "ack_sparse",
+            plaintext: fr_ack_bytes(0xFFFF_FFF0, 300, sparse),
+            result: Ok(vec![FrExpect::Ack(0xFFFF_FFF0, 300, sparse)]),
+        },
+        FrCase {
+            name: "stream_offset_0",
+            plaintext: fr_stream_bytes(0, b"hello"),
+            result: Ok(vec![FrExpect::Stream(0, b"hello".to_vec())]),
+        },
+        FrCase {
+            name: "stream_big_offset",
+            plaintext: fr_stream_bytes(1 << 40, &[1, 2, 3]),
+            result: Ok(vec![FrExpect::Stream(1 << 40, vec![1, 2, 3])]),
+        },
+        FrCase {
+            name: "datagram_1100",
+            plaintext: fr_datagram_bytes(&[0xd1; 1100]),
+            result: Ok(vec![FrExpect::Datagram(vec![0xd1; 1100])]),
+        },
+        FrCase {
+            name: "datagram_1101",
+            plaintext: fr_datagram_bytes(&[0xd1; 1101]),
+            result: Err(Error::TooLarge),
+        },
+        FrCase {
+            name: "mixed_three_frames",
+            plaintext: cat(&[
+                fr_ack_bytes(99, 5, 0xFFFF_FFFF_FFFF_FFFE),
+                fr_stream_bytes(70, b"abc"),
+                fr_datagram_bytes(b"xyz"),
+            ]),
+            result: Ok(vec![
+                FrExpect::Ack(99, 5, 0xFFFF_FFFF_FFFF_FFFE),
+                FrExpect::Stream(70, b"abc".to_vec()),
+                FrExpect::Datagram(b"xyz".to_vec()),
+            ]),
+        },
+        FrCase {
+            name: "two_acks",
+            plaintext: cat(&[fr_ack_bytes(1, 1, u64::MAX), fr_ack_bytes(2, 2, u64::MAX)]),
+            result: Err(Error::DuplicateAck),
+        },
+        FrCase {
+            name: "datagram_1101_after_two_acks",
+            plaintext: dg_big_after_acks,
+            result: Err(Error::DuplicateAck),
+        },
+        FrCase {
+            name: "ack_present_ff",
+            plaintext: vec![0x01, 0, 0, 0, 9, 0, 0, 0x01, 0xFF],
+            result: Err(Error::NonCanonicalAck),
+        },
+        FrCase {
+            name: "ack_truncated_bits",
+            plaintext: vec![0x01, 0, 0, 0, 9, 0, 0, 0x03, 0x00],
+            result: Err(Error::Truncated),
+        },
+        FrCase {
+            name: "unknown_type_04",
+            plaintext: vec![0x04],
+            result: Err(Error::BadType),
+        },
+        FrCase {
+            name: "stream_truncated_data",
+            plaintext: vec![0x02, 0x00, 0x05, 0xaa, 0xbb],
+            result: Err(Error::Truncated),
+        },
+        FrCase {
+            name: "stream_noncanonical_offset",
+            plaintext: vec![0x02, 0x40, 0x01, 0x00],
+            result: Err(Error::NonCanonicalVarint),
+        },
+        FrCase {
+            name: "stream_offset_overflow",
+            plaintext: cat(&[vec![0x02], fr_varint(max), vec![0x01, 0xaa]]),
+            result: Err(Error::ValueTooLarge),
+        },
+        FrCase {
+            name: "stream_end_at_limit",
+            plaintext: cat(&[vec![0x02], fr_varint(max), vec![0x00]]),
+            result: Ok(vec![FrExpect::Stream(max, vec![])]),
+        },
+    ]
+}
+
+fn fr_expect_json(f: &FrExpect) -> Value {
+    match f {
+        FrExpect::Ack(l, d, b) => json!({
+            "type": "ack", "largest_pn_low": l, "ack_delay": d,
+            "ack_bits_hex": format!("{b:016x}"),
+        }),
+        FrExpect::Stream(o, d) => {
+            json!({"type": "stream", "offset": o, "data_hex": hex::encode(d)})
+        }
+        FrExpect::Datagram(d) => json!({"type": "datagram", "data_hex": hex::encode(d)}),
+    }
+}
+
+fn fr_frame_json(f: &Frame) -> Value {
+    match f {
+        Frame::Ack(a) => fr_expect_json(&FrExpect::Ack(a.largest_pn_low, a.ack_delay, a.ack_bits)),
+        Frame::Stream { offset, data } => fr_expect_json(&FrExpect::Stream(*offset, data.to_vec())),
+        Frame::Datagram(d) => fr_expect_json(&FrExpect::Datagram(d.to_vec())),
+    }
+}
+
+#[test]
+#[ignore = "regenerates vectors/frames.json"]
+fn write_frames_vectors() {
+    let cases: Vec<Value> = fr_cases()
+        .iter()
+        .map(|c| match &c.result {
+            Ok(frames) => json!({
+                "name": c.name,
+                "plaintext_hex": hex::encode(&c.plaintext),
+                "expect": {"frames": frames.iter().map(fr_expect_json).collect::<Vec<_>>()},
+            }),
+            Err(e) => json!({
+                "name": c.name,
+                "plaintext_hex": hex::encode(&c.plaintext),
+                "error": e.code(),
+            }),
+        })
+        .collect();
+    common::write_vectors(FR_FILE, &json!({ "cases": cases }));
+}
+
+#[test]
+fn check_frames_vectors() {
+    let file = common::read_vectors(FR_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), fr_cases().len());
+    let mut names = std::collections::HashSet::new();
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        assert!(names.insert(name), "duplicate case name {name}");
+        let plaintext = hex::decode(c["plaintext_hex"].as_str().unwrap()).unwrap();
+        let got = decode_frames(&plaintext);
+        match c.get("error") {
+            Some(code) => assert_eq!(
+                got.map(|_| ()).map_err(|e| e.code()),
+                Err(code.as_str().unwrap()),
+                "{name}"
+            ),
+            None => {
+                let frames = got.unwrap_or_else(|e| panic!("{name}: {e}"));
+                let json: Vec<Value> = frames.iter().map(fr_frame_json).collect();
+                assert_eq!(Value::Array(json), c["expect"]["frames"], "{name}");
+                // Canonical encoding: re-encoding reproduces the input bytes.
+                let mut again = Vec::new();
+                for f in &frames {
+                    encode_frame(f, &mut again).unwrap();
+                }
+                assert_eq!(again, plaintext, "{name}");
+            }
         }
     }
 }
