@@ -12,6 +12,15 @@ else()
 endif()
 option(GLASSY_PROTO_SERVER "Build the server-side sources" ${_glassy_server_default})
 option(GLASSY_PROTO_TESTS "Build the tests" ON)
+option(GLASSY_PROTO_SANITIZE "Build our targets and tests with ASan and UBSan (clang)" OFF)
+
+if(GLASSY_PROTO_SANITIZE)
+  # Global so gtest and the vendored libraries are instrumented consistently; nettle is a
+  # system library and stays uninstrumented. No recovery: any report fails the test.
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
+    -fno-sanitize-recover=all)
+  add_link_options(-fsanitize=address,undefined)
+endif()
 
 # Monocypher is third-party code: no -Werror, no warning flags.
 add_library(glassy_monocypher STATIC third_party/monocypher/monocypher.c)
@@ -25,6 +34,16 @@ target_include_directories(glassy_proto_core PUBLIC include PRIVATE src)
 target_link_libraries(glassy_proto_core PUBLIC glassy_monocypher)
 target_compile_options(glassy_proto_core PRIVATE
   -Wall -Wextra -Werror -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
+
+# Size gate (tools/check_size.sh): a probe that references every public core function against an
+# empty baseline. Static, stripped and gc-sections so only referenced code counts.
+foreach(_t size_probe size_baseline)
+  add_executable(${_t} EXCLUDE_FROM_ALL tools/${_t}.cc)
+  target_compile_options(${_t} PRIVATE -Os -ffunction-sections -fdata-sections -fno-exceptions
+    -fno-rtti)
+  target_link_options(${_t} PRIVATE -static -Wl,--gc-sections -s)
+endforeach()
+target_link_libraries(size_probe PRIVATE glassy_proto_core)
 
 if(GLASSY_PROTO_SERVER)
   find_package(PkgConfig REQUIRED)
@@ -111,4 +130,14 @@ if(GLASSY_PROTO_TESTS)
     target_compile_options(packet_server_test PRIVATE -Wall -Wextra -Werror)
     gtest_discover_tests(packet_server_test)
   endif()
+
+  # The sweep also covers the server-side parsers when they are built.
+  add_executable(robustness_test tests/robustness_test.cc)
+  target_link_libraries(robustness_test PRIVATE glassy_proto_test_support GTest::gtest_main)
+  if(GLASSY_PROTO_SERVER)
+    target_link_libraries(robustness_test PRIVATE glassy_proto_server)
+    target_compile_definitions(robustness_test PRIVATE GLASSY_PROTO_HAS_SERVER=1)
+  endif()
+  target_compile_options(robustness_test PRIVATE -Wall -Wextra -Werror)
+  gtest_discover_tests(robustness_test)
 endif()

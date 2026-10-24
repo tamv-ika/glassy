@@ -74,7 +74,9 @@ TEST(PacketsCore, Vectors) {
         EXPECT_EQ(to_hex(std::span(out).first(r.value())), e["bytes_hex"].get<std::string>());
       }
     } else if (packet == "connect" && op == "parse") {
-      auto r = parse_connect(bytes(c, "packet_hex"));
+      // The view borrows from the packet, so the bytes must outlive it.
+      const auto packet_bytes = bytes(c, "packet_hex");
+      auto r = parse_connect(packet_bytes);
       if (!expect_error(c, r)) {
         const auto& v = r.value();
         EXPECT_EQ(to_hex(v.session_id), e["session_id_hex"].get<std::string>());

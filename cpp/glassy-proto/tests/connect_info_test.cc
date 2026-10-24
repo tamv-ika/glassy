@@ -31,7 +31,13 @@ void* operator new(size_t size) {
   if (p == nullptr) std::abort();
   return p;
 }
+// The nothrow forms are replaced too (libstdc++ uses them internally), otherwise ASan sees
+// a malloc/operator-new mismatch.
+void* operator new(size_t size, const std::nothrow_t&) noexcept {
+  return std::malloc(size == 0 ? 1 : size);
+}
 void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, const std::nothrow_t&) noexcept { std::free(p); }
 void operator delete(void* p, size_t) noexcept { std::free(p); }
 
 namespace {

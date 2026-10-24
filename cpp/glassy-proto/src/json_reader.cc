@@ -126,7 +126,7 @@ bool JsonReader::lex_string() {
     const char c = doc_[pos_];
     if (c == '"') {
       if (pending_high) strict_utf16_ = false;
-      text_ = doc_.substr(start, pos_ - start);
+      text_ = std::string_view(doc_.data() + start, pos_ - start);
       ++pos_;
       return true;
     }
@@ -193,12 +193,15 @@ bool JsonReader::lex_number() {
     if (pos_ < doc_.size() && (doc_[pos_] == '+' || doc_[pos_] == '-')) ++pos_;
     if (!digits()) return false;
   }
-  text_ = doc_.substr(start, pos_ - start);
+  text_ = std::string_view(doc_.data() + start, pos_ - start);
   return true;
 }
 
 bool JsonReader::lex_literal(std::string_view word) {
-  if (doc_.substr(pos_, word.size()) != word) return false;
+  // No substr(): its out_of_range throw is dead weight in a -fno-exceptions library (it links the
+  // verbose terminate handler and printf, ~80 KB). pos_ <= doc_.size() always holds.
+  if (doc_.size() - pos_ < word.size()) return false;
+  if (std::string_view(doc_.data() + pos_, word.size()) != word) return false;
   pos_ += word.size();
   return true;
 }
