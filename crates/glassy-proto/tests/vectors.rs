@@ -6,6 +6,11 @@ mod common;
 
 use aes_gcm::aead::AeadInOut;
 use aes_gcm::{Aes128Gcm, KeyInit};
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use glassy_proto::connect_info::{
+    ConnectInfo, NativeInfo, WebRtcInfo, WtInfo, decode_connect_info, encode_connect_info,
+};
 use glassy_proto::crypto::{k_ticket, xchacha_seal};
 use glassy_proto::ice::ice_pwd;
 use glassy_proto::retry::{mint_retry_token, retry_token_odcid, validate_retry_token};
@@ -895,4 +900,684 @@ fn check_retry_token_vectors() {
             ),
         }
     }
+}
+
+// ---------------------------------------------------------------- connect_info.json
+
+const CI_FILE: &str = "connect_info.json";
+
+fn b64(bytes: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn ci_native() -> NativeInfo {
+    let rt = RoutingTicket {
+        server_id: [0xab; 16],
+        session_id: [1, 2, 3, 4, 5, 6, 7, 8],
+        expiry: RT_EXPIRY,
+        transports: transport::NATIVE | transport::WEBRTC | transport::WEBTRANSPORT,
+    };
+    NativeInfo {
+        gateways: vec!["203.0.113.10:443".into(), "203.0.113.11:443".into()],
+        routing_ticket: seal_routing(&rt, &rt_ring(), [0x88; 12]),
+        server_ticket: ci_server_ticket(transport::NATIVE),
+        key_c2s: [0x44; 32],
+        key_s2c: [0x55; 32],
+    }
+}
+
+fn ci_server_ticket(tr: u8) -> Vec<u8> {
+    let t = ServerTicket {
+        native_keys: (tr == transport::NATIVE).then_some(NativeKeys {
+            c2s: [0x44; 32],
+            s2c: [0x55; 32],
+        }),
+        ..st_ticket(tr, "user-1", Vec::new())
+    };
+    seal_server(&t, &st_ring(), [0x99; 24]).unwrap()
+}
+
+fn ci_webrtc() -> WebRtcInfo {
+    let ufrag = to_ufrag(&ci_native().routing_ticket);
+    let fp: Vec<String> = (0..32u8).map(|i| format!("{:02X}", i * 7)).collect();
+    WebRtcInfo {
+        candidates: vec!["203.0.113.10:443".into()],
+        ice_pwd: ice_pwd(&[0x22; 32], &ufrag),
+        ice_ufrag: ufrag,
+        dtls_fingerprint: format!("sha-256 {}", fp.join(":")),
+        server_ticket: ci_server_ticket(transport::WEBRTC),
+    }
+}
+
+fn ci_wt() -> WtInfo {
+    let host = to_sni_labels(&ci_native().routing_ticket);
+    let t = b64(&ci_server_ticket(transport::WEBTRANSPORT));
+    WtInfo {
+        url: format!("https://{host}.wt.example.test:443/glassy?t={t}"),
+        cert_sha256: [0xcd; 32],
+    }
+}
+
+fn ci_all() -> ConnectInfo {
+    ConnectInfo {
+        session_id: [1, 2, 3, 4, 5, 6, 7, 8],
+        expiry: RT_EXPIRY,
+        native: Some(ci_native()),
+        webrtc: Some(ci_webrtc()),
+        webtransport: Some(ci_wt()),
+    }
+}
+
+fn ci_json(ci: &ConnectInfo) -> String {
+    String::from_utf8(
+        URL_SAFE_NO_PAD
+            .decode(encode_connect_info(ci).unwrap())
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// Replaces the single occurrence of `from`; a miss would silently weaken a case.
+fn mutate(json: &str, from: &str, to: &str) -> String {
+    assert_eq!(json.matches(from).count(), 1, "mutation anchor {from}");
+    json.replacen(from, to, 1)
+}
+
+enum CiInput {
+    Json(String),
+    B64(String),
+}
+
+struct CiCase {
+    name: &'static str,
+    input: CiInput,
+    expect: Result<ConnectInfo, Error>,
+}
+
+fn ci_input_str(i: &CiInput) -> String {
+    match i {
+        CiInput::Json(j) => b64(j.as_bytes()),
+        CiInput::B64(s) => s.clone(),
+    }
+}
+
+fn ci_cases() -> Vec<CiCase> {
+    let all = ci_all();
+    let base = ci_json(&all);
+    let native_only = ConnectInfo {
+        webrtc: None,
+        webtransport: None,
+        ..all.clone()
+    };
+    let webrtc_only = ConnectInfo {
+        native: None,
+        webtransport: None,
+        ..all.clone()
+    };
+    let wt_only = ConnectInfo {
+        native: None,
+        webrtc: None,
+        ..all.clone()
+    };
+    let ok = |name, json: String, expect: &ConnectInfo| CiCase {
+        name,
+        input: CiInput::Json(json),
+        expect: Ok(expect.clone()),
+    };
+    let bad = |name, json: String, e: Error| CiCase {
+        name,
+        input: CiInput::Json(json),
+        expect: Err(e),
+    };
+    let nat = ci_native();
+    let wr = ci_webrtc();
+    let sid = "\"session_id\":\"0102030405060708\"";
+    let head = "{\"v\":1,\"session_id\":\"0102030405060708\",\"expiry\":2000000000";
+
+    let mut v = vec![
+        ok("native_only", ci_json(&native_only), &native_only),
+        ok("webrtc_only", ci_json(&webrtc_only), &webrtc_only),
+        ok("wt_only", ci_json(&wt_only), &wt_only),
+        ok("all_blocks", base.clone(), &all),
+    ];
+    // serde_json's Value sorts keys, which puts `v` last and the blocks in alphabetical order.
+    let value: Value = serde_json::from_str(&base).unwrap();
+    v.push(ok("shuffled_keys", value.to_string(), &all));
+    v.push(ok(
+        "whitespace_everywhere",
+        format!(
+            " \r\n\t{}\n ",
+            serde_json::to_string_pretty(&value).unwrap()
+        ),
+        &all,
+    ));
+    v.push(ok(
+        "unknown_top_field",
+        mutate(
+            &base,
+            "\"v\":1,",
+            "\"v\":1,\"future\":{\"a\":[1,2.5e3,null,true]},",
+        ),
+        &all,
+    ));
+    v.push(ok(
+        "unknown_nested_field",
+        mutate(&base, "\"key_c2s\"", "\"extra\":{\"x\":[{}]},\"key_c2s\""),
+        &all,
+    ));
+    v.push(ok(
+        "escape_in_unknown_field",
+        mutate(
+            &base,
+            "\"v\":1,",
+            "\"v\":1,\"note\":\"a\\n\\\"b\\\\ \\u00e9\\ud83d\\ude00\",",
+        ),
+        &all,
+    ));
+    v.push(ok(
+        "unicode_in_unknown_field",
+        mutate(
+            &base,
+            "\"v\":1,",
+            "\"v\":1,\"note\":\"h\u{e9}llo \u{4e16}\u{754c} \u{1f600}\",",
+        ),
+        &all,
+    ));
+    // Unknown values only have to match the JSON grammar; lone surrogate escapes and numbers
+    // outside any machine range are accepted (pinned because the C++ scanner must agree).
+    v.push(ok(
+        "lone_surrogate_in_unknown_field",
+        mutate(
+            &base,
+            "\"v\":1,",
+            "\"v\":1,\"x\":\"\\ud800\\udc00\\udc00\",",
+        ),
+        &all,
+    ));
+    v.push(ok(
+        "huge_number_in_unknown_field",
+        mutate(
+            &base,
+            "\"v\":1,",
+            "\"v\":1,\"x\":[1e999,-123456789012345678901234567890],",
+        ),
+        &all,
+    ));
+    v.push(bad(
+        "bad_escape_in_unknown_field",
+        mutate(&base, "\"v\":1,", "\"v\":1,\"x\":\"\\q\","),
+        Error::BadJson,
+    ));
+    v.push(ok(
+        "duplicate_unknown_key",
+        mutate(&base, "\"v\":1,", "\"v\":1,\"x\":1,\"x\":2,"),
+        &all,
+    ));
+    v.push(ok(
+        "depth_8_unknown_field",
+        mutate(&base, "\"v\":1,", "\"v\":1,\"x\":[[[[[[[0]]]]]]],"),
+        &all,
+    ));
+    v.push(ok(
+        "expiry_zero",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":0"),
+        &ConnectInfo {
+            expiry: 0,
+            ..all.clone()
+        },
+    ));
+    v.push(ok(
+        "expiry_max",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":4294967295"),
+        &ConnectInfo {
+            expiry: u32::MAX,
+            ..all.clone()
+        },
+    ));
+    let mut padded = base.clone();
+    padded.push_str(&" ".repeat(4096 - padded.len()));
+    v.push(ok("json_4096_bytes", padded, &all));
+
+    // Invalid.
+    v.push(bad(
+        "v_2",
+        mutate(&base, "\"v\":1", "\"v\":2"),
+        Error::BadVersion,
+    ));
+    v.push(bad(
+        "v_string",
+        mutate(&base, "\"v\":1", "\"v\":\"1\""),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "v_missing",
+        mutate(&base, "\"v\":1,", ""),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "v_float",
+        mutate(&base, "\"v\":1", "\"v\":1.0"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "v_huge_integer",
+        mutate(&base, "\"v\":1", "\"v\":123456789012345678901234567890"),
+        Error::BadVersion,
+    ));
+    v.push(bad(
+        "v_2_other_schema",
+        "{\"v\":2,\"session_id\":5,\"native\":[]}".into(),
+        Error::BadVersion,
+    ));
+    v.push(bad(
+        "depth_9",
+        mutate(&base, "\"v\":1,", "\"v\":1,\"x\":[[[[[[[[0]]]]]]]],"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "duplicate_key",
+        mutate(
+            &base,
+            "\"expiry\":2000000000",
+            "\"expiry\":2000000000,\"expiry\":2000000000",
+        ),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "duplicate_key_in_block",
+        mutate(
+            &base,
+            "\"cert_sha256\"",
+            "\"url\":\"https://x\",\"cert_sha256\"",
+        ),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "escape_in_known_field",
+        mutate(&base, sid, "\"session_id\":\"010203040506070\\u0038\""),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "escaped_key_not_matched",
+        mutate(&base, "\"expiry\"", "\"expir\\u0079\""),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "uppercase_session_id",
+        mutate(&base, sid, "\"session_id\":\"0A0B0C0D0E0F0102\""),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "session_id_short",
+        mutate(&base, sid, "\"session_id\":\"01\""),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "no_transport_block",
+        format!("{head}}}"),
+        Error::BadJson,
+    ));
+    v.push(bad("top_level_array", "[1]".into(), Error::BadJson));
+    v.push(bad(
+        "null_block",
+        format!("{head},\"native\":null}}"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "missing_key_c2s",
+        mutate(
+            &base,
+            &format!("\"key_c2s\":\"{}\",", b64(&nat.key_c2s)),
+            "",
+        ),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "key_c2s_wrong_type",
+        mutate(
+            &base,
+            &format!("\"key_c2s\":\"{}\"", b64(&nat.key_c2s)),
+            "\"key_c2s\":7",
+        ),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "key_c2s_31_bytes",
+        mutate(&base, &b64(&nat.key_c2s), &b64(&[0x44; 31])),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "key_c2s_bad_char",
+        mutate(
+            &base,
+            &b64(&nat.key_c2s),
+            &format!("!{}", &b64(&nat.key_c2s)[1..]),
+        ),
+        Error::BadEncoding,
+    ));
+    let gw = "[\"203.0.113.10:443\",\"203.0.113.11:443\"]";
+    v.push(bad(
+        "gateways_empty",
+        mutate(&base, gw, "[]"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "gateways_5",
+        mutate(&base, gw, "[\"a:1\",\"b:1\",\"c:1\",\"d:1\",\"e:1\"]"),
+        Error::TooLarge,
+    ));
+    v.push(bad(
+        "gateway_empty_string",
+        mutate(&base, gw, "[\"\"]"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "gateway_65_bytes",
+        mutate(&base, gw, &format!("[\"{}\"]", "a".repeat(65))),
+        Error::TooLarge,
+    ));
+    v.push(bad(
+        "routing_ticket_59_bytes",
+        mutate(
+            &base,
+            &b64(&nat.routing_ticket),
+            &b64(&nat.routing_ticket[..59]),
+        ),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "ticket_too_short",
+        mutate(
+            &base,
+            &b64(&nat.server_ticket),
+            &b64(&nat.server_ticket[..138]),
+        ),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "native_ticket_459",
+        mutate(&base, &b64(&nat.server_ticket), &b64(&[0u8; 459])),
+        Error::BadLength,
+    ));
+    v.push(ok(
+        "native_ticket_458",
+        mutate(&base, &b64(&nat.server_ticket), &b64(&[0u8; 458])),
+        &ConnectInfo {
+            native: Some(NativeInfo {
+                server_ticket: vec![0; 458],
+                ..nat.clone()
+            }),
+            ..all.clone()
+        },
+    ));
+    v.push(bad(
+        "webrtc_ticket_395",
+        mutate(&base, &b64(&wr.server_ticket), &b64(&[0u8; 395])),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "webrtc_ticket_74",
+        mutate(&base, &b64(&wr.server_ticket), &b64(&[0u8; 74])),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "ufrag_79_chars",
+        mutate(&base, &wr.ice_ufrag, &wr.ice_ufrag[1..]),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "ufrag_bad_char",
+        mutate(&base, &wr.ice_ufrag, &format!("-{}", &wr.ice_ufrag[1..])),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "pwd_bad_char",
+        mutate(&base, &wr.ice_pwd, &format!("{}-", &wr.ice_pwd[1..])),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "pwd_42_chars",
+        mutate(&base, &wr.ice_pwd, &wr.ice_pwd[1..]),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "candidates_empty",
+        mutate(
+            &base,
+            "\"candidates\":[\"203.0.113.10:443\"]",
+            "\"candidates\":[]",
+        ),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "dtls_fingerprint_empty",
+        mutate(&base, &wr.dtls_fingerprint, ""),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "dtls_fingerprint_129",
+        mutate(&base, &wr.dtls_fingerprint, &"A".repeat(129)),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "dtls_fingerprint_non_ascii",
+        mutate(&base, &wr.dtls_fingerprint, "sha-256 \u{e9}"),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "url_not_https",
+        mutate(&base, "\"url\":\"https://", "\"url\":\"http://"),
+        Error::BadEncoding,
+    ));
+    v.push(bad(
+        "url_1025_bytes",
+        mutate(
+            &base,
+            "/glassy?t=",
+            &format!("/glassy?t={}", "a".repeat(1025 - (ci_wt().url.len() - 10))),
+        ),
+        Error::BadLength,
+    ));
+    v.push(bad(
+        "cert_sha256_31_bytes",
+        mutate(&base, &b64(&[0xcd; 32]), &b64(&[0xcd; 31])),
+        Error::BadLength,
+    ));
+
+    // Encoding-level failures.
+    let mut pad = base.clone();
+    while pad.len() % 3 != 1 {
+        pad.push(' ');
+    }
+    let padded = STANDARD.encode(pad.as_bytes());
+    assert!(padded.ends_with('='));
+    v.push(CiCase {
+        name: "base64_padding",
+        input: CiInput::B64(URL_SAFE_NO_PAD.encode(pad.as_bytes()) + "=="),
+        expect: Err(Error::BadEncoding),
+    });
+    let mut unpadded = URL_SAFE_NO_PAD.encode(pad.as_bytes());
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let last = unpadded.pop().unwrap();
+    let idx = alphabet.find(last).unwrap();
+    assert_eq!(
+        idx & 0x0f,
+        0,
+        "premise: trailing bits of a valid encoding are zero"
+    );
+    unpadded.push(alphabet.as_bytes()[idx | 1] as char);
+    v.push(CiCase {
+        name: "base64_nonzero_trailing_bits",
+        input: CiInput::B64(unpadded),
+        expect: Err(Error::BadEncoding),
+    });
+    v.push(CiCase {
+        name: "base64_standard_alphabet",
+        input: CiInput::B64(STANDARD.encode([0xfbu8, 0xff, 0xfe, 0xfb])),
+        expect: Err(Error::BadEncoding),
+    });
+    let mut too_big = base.clone();
+    too_big.push_str(&" ".repeat(4097 - too_big.len()));
+    v.push(bad("json_4097_bytes", too_big, Error::TooLarge));
+    v.push(bad("trailing_garbage", format!("{base}x"), Error::BadJson));
+    v.push(bad(
+        "trailing_second_object",
+        format!("{base}{{}}"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "truncated_json",
+        base[..base.len() - 1].to_string(),
+        Error::BadJson,
+    ));
+    v.push(CiCase {
+        name: "invalid_utf8",
+        input: CiInput::B64(b64(&[
+            &base.as_bytes()[..base.len() - 1],
+            b",\"x\":\"\xff\"}",
+        ]
+        .concat())),
+        expect: Err(Error::BadJson),
+    });
+    v.push(bad(
+        "expiry_float",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":2000000000.0"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "expiry_exponent",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":2e9"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "expiry_negative",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":-1"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "expiry_overflow",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":4294967296"),
+        Error::BadJson,
+    ));
+    v.push(bad(
+        "expiry_string",
+        mutate(&base, "\"expiry\":2000000000", "\"expiry\":\"2000000000\""),
+        Error::BadJson,
+    ));
+    v
+}
+
+fn ci_hex_block(ci: &ConnectInfo) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("session_id".into(), json!(hex::encode(ci.session_id)));
+    m.insert("expiry".into(), json!(ci.expiry));
+    if let Some(n) = &ci.native {
+        m.insert(
+            "native".into(),
+            json!({
+                "gateways": n.gateways,
+                "routing_ticket_hex": hex::encode(n.routing_ticket),
+                "server_ticket_hex": hex::encode(&n.server_ticket),
+                "key_c2s_hex": hex::encode(n.key_c2s),
+                "key_s2c_hex": hex::encode(n.key_s2c),
+            }),
+        );
+    }
+    if let Some(w) = &ci.webrtc {
+        m.insert(
+            "webrtc".into(),
+            json!({
+                "candidates": w.candidates,
+                "ice_ufrag": w.ice_ufrag,
+                "ice_pwd": w.ice_pwd,
+                "dtls_fingerprint": w.dtls_fingerprint,
+                "server_ticket_hex": hex::encode(&w.server_ticket),
+            }),
+        );
+    }
+    if let Some(t) = &ci.webtransport {
+        m.insert(
+            "webtransport".into(),
+            json!({ "url": t.url, "cert_sha256_hex": hex::encode(t.cert_sha256) }),
+        );
+    }
+    Value::Object(m)
+}
+
+#[test]
+fn connect_info_cases_match_their_expectations() {
+    for c in ci_cases() {
+        assert_eq!(
+            decode_connect_info(&ci_input_str(&c.input)),
+            c.expect,
+            "{}",
+            c.name
+        );
+    }
+}
+
+#[test]
+#[ignore = "regenerates vectors/connect_info.json"]
+fn write_connect_info_vectors() {
+    let cases: Vec<Value> = ci_cases()
+        .iter()
+        .map(|c| {
+            let mut m = serde_json::Map::new();
+            m.insert("name".into(), json!(c.name));
+            match &c.input {
+                CiInput::Json(j) => m.insert("json".into(), json!(j)),
+                CiInput::B64(s) => m.insert("input".into(), json!(s)),
+            };
+            match &c.expect {
+                Ok(ci) => m.insert("expect".into(), ci_hex_block(ci)),
+                Err(e) => m.insert("error".into(), json!(e.code())),
+            };
+            Value::Object(m)
+        })
+        .collect();
+    common::write_vectors(CI_FILE, &json!({ "cases": cases }));
+}
+
+#[test]
+fn check_connect_info_vectors() {
+    let file = common::read_vectors(CI_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), ci_cases().len());
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let input = match (c.get("json"), c.get("input")) {
+            (Some(j), None) => b64(j.as_str().unwrap().as_bytes()),
+            (None, Some(i)) => i.as_str().unwrap().to_string(),
+            _ => panic!("{name}: need exactly one of json/input"),
+        };
+        let got = decode_connect_info(&input);
+        match c.get("error") {
+            Some(code) => assert_eq!(
+                got.map_err(|e| e.code()),
+                Err(code.as_str().unwrap()),
+                "{name}"
+            ),
+            None => assert_eq!(
+                ci_hex_block(&got.unwrap_or_else(|e| panic!("{name}: {e}"))),
+                c["expect"],
+                "{name}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn connect_info_encode_is_canonical_and_roundtrips() {
+    let ci = ci_all();
+    let s = encode_connect_info(&ci).unwrap();
+    assert_eq!(decode_connect_info(&s), Ok(ci));
+    let json = ci_json(&ci_all());
+    assert!(json.starts_with(
+        "{\"v\":1,\"session_id\":\"0102030405060708\",\"expiry\":2000000000,\"native\":{\"gateways\":"
+    ));
+    let keys: Vec<usize> = ["\"native\"", "\"webrtc\"", "\"webtransport\""]
+        .iter()
+        .map(|k| json.find(k).unwrap())
+        .collect();
+    assert!(keys.windows(2).all(|w| w[0] < w[1]));
 }

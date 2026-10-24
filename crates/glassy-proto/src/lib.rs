@@ -1,5 +1,6 @@
 //! Byte-level wire format for glassy (SP1). Mirrored byte for byte by the C++ lib.
 
+pub mod connect_info;
 pub mod consts;
 pub mod crypto;
 pub mod error;
