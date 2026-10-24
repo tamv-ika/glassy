@@ -13,6 +13,9 @@ use glassy_proto::connect_info::{
 };
 use glassy_proto::crypto::{k_ticket, xchacha_seal};
 use glassy_proto::ice::ice_pwd;
+use glassy_proto::packet::{
+    ClientAddrV4, append_trailer, build_connect, parse_connect, split_trailer, verify_connect,
+};
 use glassy_proto::retry::{mint_retry_token, retry_token_odcid, validate_retry_token};
 use glassy_proto::routing_ticket::{
     RoutingKeyRing, RoutingTicket, from_sni, from_ufrag, open_routing, seal_routing, to_sni_labels,
@@ -1580,4 +1583,365 @@ fn connect_info_encode_is_canonical_and_roundtrips() {
         .map(|k| json.find(k).unwrap())
         .collect();
     assert!(keys.windows(2).all(|w| w[0] < w[1]));
+}
+
+// ---------------------------------------------------------------- native_packets.json
+//
+// One file for every native packet kind. Each case names its `packet` kind and the `op`
+// applied to it; the generator concatenates one helper per packet kind, so later packet
+// kinds append a helper and a checker arm without touching existing cases.
+
+const NP_FILE: &str = "native_packets.json";
+const NP_NOW: u32 = 1_900_000_000;
+const NP_SEQ: u64 = 1_700_000_000_000;
+const NP_CONN: [u8; 16] = [0x66; 16];
+const NP_SESSION: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+const NP_KEY_C2S: [u8; 32] = [0x44; 32];
+
+struct NpCase {
+    name: &'static str,
+    packet: &'static str,
+    op: &'static str,
+    /// Input fields, in file order after `name`/`packet`/`op`.
+    inputs: Vec<(&'static str, Value)>,
+    expect: Result<Value, Error>,
+}
+
+fn np_routing() -> [u8; 60] {
+    let t = RoutingTicket {
+        server_id: [0xab; 16],
+        session_id: NP_SESSION,
+        expiry: RT_EXPIRY,
+        transports: transport::NATIVE,
+    };
+    seal_routing(&t, &RoutingKeyRing::new(1, [0x11; 16]), [0x88; 12])
+}
+
+/// Native ticket for `session`, user `"u"`, no metadata: the 139-byte minimum.
+fn np_native_ticket(session: [u8; 8]) -> Vec<u8> {
+    let mut t = st_ticket(transport::NATIVE, "u", Vec::new());
+    t.session_id = session;
+    seal_server(&t, &st_ring(), ST_NONCE).unwrap()
+}
+
+fn np_connect(st: &[u8], pad_to: usize) -> Vec<u8> {
+    build_connect(
+        &NP_SESSION,
+        &NP_CONN,
+        NP_SEQ,
+        &np_routing(),
+        st,
+        &NP_KEY_C2S,
+        pad_to,
+    )
+    .unwrap()
+}
+
+fn np_packet_input(b: &[u8]) -> Vec<(&'static str, Value)> {
+    vec![("packet_hex", json!(hex::encode(b)))]
+}
+
+fn np_verify_input(b: &[u8]) -> Vec<(&'static str, Value)> {
+    let mut v = np_packet_input(b);
+    v.push(("now", json!(NP_NOW)));
+    v.push(("self_server_id_hex", json!(hex::encode(ST_SERVER_ID))));
+    v
+}
+
+fn np_parse_expect(b: &[u8]) -> Value {
+    let v = parse_connect(b).unwrap();
+    json!({
+        "session_id_hex": hex::encode(v.session_id),
+        "conn_id_hex": hex::encode(v.conn_id),
+        "connect_seq": v.connect_seq,
+        "routing_ticket_hex": hex::encode(v.routing_ticket),
+        "server_ticket_hex": hex::encode(v.server_ticket),
+        "proof_tag_hex": hex::encode(v.proof_tag),
+        "padding_len": v.padding.len(),
+    })
+}
+
+fn np_verify_expect() -> Value {
+    json!({
+        "session_id_hex": hex::encode(NP_SESSION),
+        "conn_id_hex": hex::encode(NP_CONN),
+        "connect_seq": NP_SEQ,
+        "user_id": "u",
+    })
+}
+
+fn np_trailer_expect(body: &[u8], a: ClientAddrV4) -> Value {
+    json!({
+        "body_hex": hex::encode(body),
+        "ip_hex": hex::encode(a.ip),
+        "port": a.port,
+    })
+}
+
+fn np_connect_cases() -> Vec<NpCase> {
+    let st = np_native_ticket(NP_SESSION);
+    let min = np_connect(&st, 0);
+    let padded = np_connect(&st, 1200);
+    let addr = ClientAddrV4 {
+        ip: [203, 0, 113, 7],
+        port: 4433,
+    };
+    let with_trailer = |b: &[u8]| {
+        let mut v = b.to_vec();
+        append_trailer(&mut v, addr);
+        v
+    };
+    let build_inputs = |st: &[u8], pad_to: usize| -> Vec<(&'static str, Value)> {
+        vec![
+            ("session_id_hex", json!(hex::encode(NP_SESSION))),
+            ("conn_id_hex", json!(hex::encode(NP_CONN))),
+            ("connect_seq", json!(NP_SEQ)),
+            ("routing_ticket_hex", json!(hex::encode(np_routing()))),
+            ("server_ticket_hex", json!(hex::encode(st))),
+            ("key_c2s_hex", json!(hex::encode(NP_KEY_C2S))),
+            ("pad_to", json!(pad_to)),
+        ]
+    };
+    let ok_bytes = |b: &[u8]| Ok(json!({ "bytes_hex": hex::encode(b) }));
+    let parse_err = |name, b: &[u8], e| NpCase {
+        name,
+        packet: "connect",
+        op: "parse",
+        inputs: np_packet_input(b),
+        expect: Err(e),
+    };
+    let verify_err = |name, b: &[u8], e| NpCase {
+        name,
+        packet: "connect",
+        op: "verify",
+        inputs: np_verify_input(b),
+        expect: Err(e),
+    };
+    let trailer_err = |name, b: &[u8]| NpCase {
+        name,
+        packet: "connect",
+        op: "split_trailer",
+        inputs: np_packet_input(b),
+        expect: Err(Error::BadTrailer),
+    };
+
+    // Mutations of the minimal packet, each hitting exactly one check.
+    let mut bad_type = min.clone();
+    bad_type[0] = 0x81;
+    let mut bad_version = min.clone();
+    bad_version[1] = 2;
+    let mut ticket_len_138 = padded.clone();
+    ticket_len_138[94..96].copy_from_slice(&138u16.to_be_bytes());
+    let mut overflow = min.clone();
+    overflow[94..96].copy_from_slice(&140u16.to_be_bytes());
+    let mut nonzero_padding = np_connect(&st, 400);
+    nonzero_padding[399] = 1;
+    // WebRTC ticket padded with metadata so it reaches 139 bytes and passes the length gate.
+    let webrtc = seal_server(
+        &st_ticket(transport::WEBRTC, "u", vec![0; 100]),
+        &st_ring(),
+        ST_NONCE,
+    )
+    .unwrap();
+    assert!(webrtc.len() >= 139);
+    let session_mismatch = np_connect(&np_native_ticket([9; 8]), 0);
+    let mut bad_proof = min.clone();
+    *bad_proof.last_mut().unwrap() ^= 1;
+    let mut both = np_connect(&st, 400);
+    both[399] = 1;
+    both[250] ^= 1;
+    let mut family_06 = with_trailer(&min);
+    *family_06.last_mut().unwrap() = 0x06;
+    let mut reserved = with_trailer(&min);
+    let n = reserved.len();
+    reserved[n - 2] = 1;
+    let mut too_long = padded.clone();
+    too_long.push(0);
+
+    vec![
+        NpCase {
+            name: "connect_min_251",
+            packet: "connect",
+            op: "build",
+            inputs: build_inputs(&st, 0),
+            expect: ok_bytes(&min),
+        },
+        NpCase {
+            name: "connect_padded_1200",
+            packet: "connect",
+            op: "build",
+            inputs: build_inputs(&st, 1200),
+            expect: ok_bytes(&padded),
+        },
+        NpCase {
+            name: "connect_min_251_parse",
+            packet: "connect",
+            op: "parse",
+            inputs: np_packet_input(&min),
+            expect: Ok(np_parse_expect(&min)),
+        },
+        NpCase {
+            name: "connect_padded_1200_parse",
+            packet: "connect",
+            op: "parse",
+            inputs: np_packet_input(&padded),
+            expect: Ok(np_parse_expect(&padded)),
+        },
+        NpCase {
+            name: "connect_min_251_verify",
+            packet: "connect",
+            op: "verify",
+            inputs: np_verify_input(&min),
+            expect: Ok(np_verify_expect()),
+        },
+        NpCase {
+            name: "connect_padded_1200_verify",
+            packet: "connect",
+            op: "verify",
+            inputs: np_verify_input(&padded),
+            expect: Ok(np_verify_expect()),
+        },
+        NpCase {
+            name: "connect_with_trailer",
+            packet: "connect",
+            op: "split_trailer",
+            inputs: np_packet_input(&with_trailer(&min)),
+            expect: Ok(np_trailer_expect(&min, addr)),
+        },
+        parse_err("len_250", &min[..250], Error::BadLength),
+        parse_err("len_1201", &too_long, Error::BadLength),
+        parse_err("bad_type", &bad_type, Error::BadType),
+        parse_err("bad_version", &bad_version, Error::BadVersion),
+        parse_err("ticket_len_138", &ticket_len_138, Error::BadLength),
+        parse_err("ticket_len_overflows_packet", &overflow, Error::BadLength),
+        verify_err("nonzero_padding", &nonzero_padding, Error::BadPadding),
+        verify_err(
+            "ticket_webrtc_in_connect",
+            &np_connect(&webrtc, 0),
+            Error::BadTransport,
+        ),
+        verify_err(
+            "session_mismatch",
+            &session_mismatch,
+            Error::SessionMismatch,
+        ),
+        verify_err("bad_proof", &bad_proof, Error::AuthFailed),
+        // Padding is checked before the ticket and the proof.
+        verify_err("nonzero_padding_and_bad_proof", &both, Error::BadPadding),
+        // The gateway's trailer left on the packet reads as nonzero padding.
+        verify_err(
+            "fake_trailer_without_split",
+            &with_trailer(&min),
+            Error::BadPadding,
+        ),
+        trailer_err("trailer_family_06", &family_06),
+        trailer_err("trailer_reserved_nonzero", &reserved),
+    ]
+}
+
+fn np_cases() -> Vec<NpCase> {
+    let mut v = Vec::new();
+    v.extend(np_connect_cases());
+    v
+}
+
+#[test]
+#[ignore = "regenerates vectors/native_packets.json"]
+fn write_native_packets_vectors() {
+    let cases: Vec<Value> = np_cases()
+        .into_iter()
+        .map(|c| {
+            let mut m = serde_json::Map::new();
+            m.insert("name".into(), json!(c.name));
+            m.insert("packet".into(), json!(c.packet));
+            m.insert("op".into(), json!(c.op));
+            for (k, v) in c.inputs {
+                m.insert(k.into(), v);
+            }
+            match c.expect {
+                Ok(e) => m.insert("expect".into(), e),
+                Err(e) => m.insert("error".into(), json!(e.code())),
+            };
+            Value::Object(m)
+        })
+        .collect();
+    common::write_vectors(NP_FILE, &json!({ "cases": cases }));
+}
+
+fn np_hex(c: &Value, key: &str) -> Vec<u8> {
+    hex::decode(c[key].as_str().unwrap_or_else(|| panic!("missing {key}"))).unwrap()
+}
+
+fn np_arr<const N: usize>(c: &Value, key: &str) -> [u8; N] {
+    np_hex(c, key).try_into().unwrap()
+}
+
+/// Runs one case and returns the result in the file's `expect` shape.
+fn np_run(c: &Value) -> Result<Value, Error> {
+    let name = c["name"].as_str().unwrap();
+    match (c["packet"].as_str().unwrap(), c["op"].as_str().unwrap()) {
+        ("connect", "build") => {
+            let b = build_connect(
+                &np_arr(c, "session_id_hex"),
+                &np_arr(c, "conn_id_hex"),
+                c["connect_seq"].as_u64().unwrap(),
+                &np_arr(c, "routing_ticket_hex"),
+                &np_hex(c, "server_ticket_hex"),
+                &np_arr(c, "key_c2s_hex"),
+                c["pad_to"].as_u64().unwrap() as usize,
+            )?;
+            Ok(json!({ "bytes_hex": hex::encode(b) }))
+        }
+        ("connect", "parse") => {
+            let b = np_hex(c, "packet_hex");
+            parse_connect(&b)?;
+            Ok(np_parse_expect(&b))
+        }
+        ("connect", "verify") => {
+            let b = np_hex(c, "packet_hex");
+            let v = verify_connect(
+                &b,
+                &st_ring(),
+                &np_arr(c, "self_server_id_hex"),
+                c["now"].as_u64().unwrap() as u32,
+            )?;
+            Ok(json!({
+                "session_id_hex": hex::encode(v.session_id),
+                "conn_id_hex": hex::encode(v.conn_id),
+                "connect_seq": v.connect_seq,
+                "user_id": v.ticket.user_id,
+            }))
+        }
+        ("connect", "split_trailer") => {
+            let b = np_hex(c, "packet_hex");
+            let (body, a) = split_trailer(&b)?;
+            Ok(np_trailer_expect(body, a))
+        }
+        (p, op) => panic!("{name}: unsupported case {p}/{op}"),
+    }
+}
+
+#[test]
+fn check_native_packets_vectors() {
+    let file = common::read_vectors(NP_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), np_cases().len());
+    let mut names = std::collections::HashSet::new();
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        assert!(names.insert(name), "duplicate case name {name}");
+        let got = np_run(c);
+        match c.get("error") {
+            Some(code) => assert_eq!(
+                got.map_err(|e| e.code()),
+                Err(code.as_str().unwrap()),
+                "{name}"
+            ),
+            None => assert_eq!(
+                got.unwrap_or_else(|e| panic!("{name}: {e}")),
+                c["expect"],
+                "{name}"
+            ),
+        }
+    }
 }
