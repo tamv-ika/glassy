@@ -12,6 +12,7 @@ use data_encoding::BASE32_NOPAD;
 
 use crate::{Error, transport};
 
+/// Wire length of a sealed routing ticket (spec §3.1).
 pub const ROUTING_TICKET_LEN: usize = 60;
 
 const VERSION: u8 = 1;
@@ -29,8 +30,11 @@ const ALLOWED_TRANSPORTS: u8 = transport::NATIVE | transport::WEBRTC | transport
 const MAX_KEYS: usize = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Plaintext routing ticket (spec §3.1).
 pub struct RoutingTicket {
+    /// UID of the game server the gateway must route to.
     pub server_id: [u8; 16],
+    /// Session the ticket was issued for.
     pub session_id: [u8; 8],
     /// Unix seconds; the ticket is valid while `expiry >= now`.
     pub expiry: u32,
@@ -45,6 +49,7 @@ pub struct RoutingKeyRing {
 }
 
 impl RoutingKeyRing {
+    /// Creates a ring holding `key` as the current key `current_id`.
     pub fn new(current_id: u8, key: [u8; 16]) -> Self {
         Self {
             keys: vec![(current_id, key)],
@@ -65,6 +70,7 @@ impl RoutingKeyRing {
         Ok(())
     }
 
+    /// Id of the key used by [`seal_routing`].
     pub fn current_id(&self) -> u8 {
         self.current
     }
@@ -163,6 +169,7 @@ pub fn to_ufrag(b: &[u8; 60]) -> String {
     STANDARD_NO_PAD.encode(b)
 }
 
+/// Decodes an ICE ufrag produced by [`to_ufrag`].
 pub fn from_ufrag(s: &str) -> Result<[u8; 60], Error> {
     // A ticket always encodes to exactly 80 chars; check before decoding.
     if s.len() != UFRAG_LEN {

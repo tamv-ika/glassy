@@ -9,7 +9,12 @@ pub enum MessageHeader {
     /// The length varint is not complete yet.
     NeedMore,
     /// `len` payload bytes follow the `header_len` header bytes.
-    Ready { len: usize, header_len: usize },
+    Ready {
+        /// Payload length announced by the header.
+        len: usize,
+        /// Number of header bytes to skip before the payload.
+        header_len: usize,
+    },
 }
 
 /// Appends the length prefix for a message of `len` bytes.

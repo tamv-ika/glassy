@@ -6,8 +6,11 @@ use crate::Error;
 const FAMILY_V4: u8 = 0x04;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Client address the gateway appends to a forwarded `CONNECT`.
 pub struct ClientAddrV4 {
+    /// IPv4 address octets.
     pub ip: [u8; 4],
+    /// UDP source port, host order.
     pub port: u16,
 }
 

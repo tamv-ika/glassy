@@ -1,4 +1,4 @@
-//! Native `DATA` and `DISCONNECT` packets (spec §4.5, §4.6).
+//! Native `DATA` and `DISCONNECT` packets (spec §4.4, §4.5).
 //!
 //! `type | session_id(8) | pn_low(u32 BE) | AEAD(body) | tag(16)`. The AAD is the 13 header
 //! bytes and the nonce is `packet_nonce(server_nonce, pn)` with the full reconstructed `pn`.
@@ -13,12 +13,17 @@ const TAG_LEN: usize = 16;
 pub const DATA_MIN: usize = HEADER_LEN + TAG_LEN;
 /// Largest frame payload that still fits a 1200-byte datagram.
 pub const MAX_FRAMES: usize = MAX_PACKET - DATA_MIN;
+/// Wire length of `DISCONNECT`: header, one reason byte and the tag (spec §4.5).
 pub const DISCONNECT_LEN: usize = HEADER_LEN + 1 + TAG_LEN;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Parsed 13-byte header shared by `DATA` and `DISCONNECT` (spec §4.1).
 pub struct Header {
+    /// Packet type byte, see [`packet_type`](super::packet_type).
     pub ty: u8,
+    /// Session the packet belongs to.
     pub session_id: [u8; 8],
+    /// Low 32 bits of the packet number; see [`decode_pn`](super::pn::decode_pn).
     pub pn_low: u32,
 }
 
@@ -95,6 +100,7 @@ pub fn seal_data(
     ))
 }
 
+/// Opens a `DATA` packet with the packet number recovered by the caller; returns the frames.
 pub fn open_data(
     key: &[u8; 32],
     server_nonce: &[u8; 16],
@@ -104,6 +110,7 @@ pub fn open_data(
     open(b, packet_type::DATA, key, server_nonce, pn)
 }
 
+/// Seals a `DISCONNECT` carrying `reason`. `pn` 0 is refused (nonce reuse with `ACCEPT`).
 pub fn seal_disconnect(
     key: &[u8; 32],
     server_nonce: &[u8; 16],

@@ -25,8 +25,16 @@ pub struct AckFrame {
 /// One frame inside a `DATA` payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame<'a> {
+    /// Acknowledgement (spec §5.2).
     Ack(AckFrame),
-    Stream { offset: u64, data: &'a [u8] },
+    /// Reliable stream bytes starting at `offset` (spec §5.3).
+    Stream {
+        /// Byte offset of `data` within the stream.
+        offset: u64,
+        /// Payload bytes.
+        data: &'a [u8],
+    },
+    /// Unreliable datagram payload (spec §5.1).
     Datagram(&'a [u8]),
 }
 

@@ -9,8 +9,11 @@
 use crate::crypto::{k_ticket, xchacha_open, xchacha_seal};
 use crate::{Error, transport};
 
+/// Smallest sealed server ticket (spec §3.2).
 pub const SERVER_TICKET_MIN: usize = 75;
+/// Largest sealed server ticket (spec §3.2).
 pub const SERVER_TICKET_MAX: usize = 458;
+/// Smallest sealed native server ticket, which carries both keys (spec §3.2).
 pub const SERVER_TICKET_NATIVE_MIN: usize = 139;
 /// WebRTC/WebTransport tickets carry no native keys (spec §3.2), hence the smaller maximum.
 pub const SERVER_TICKET_BROWSER_MAX: usize = 394;
@@ -29,15 +32,20 @@ const MAX_KEYS: usize = 16;
 /// Per-direction packet keys; carried only by native tickets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeKeys {
+    /// Client-to-server packet key.
     pub c2s: [u8; 32],
+    /// Server-to-client packet key.
     pub s2c: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Plaintext server ticket (spec §3.2).
 pub struct ServerTicket {
+    /// Authenticated user id, 1 to `USER_ID_MAX` bytes of UTF-8.
     pub user_id: String,
     /// UID of the one game server this ticket is valid on (spec §3.2, change 4).
     pub server_id: [u8; 16],
+    /// Session the ticket was issued for.
     pub session_id: [u8; 8],
     /// Unix seconds; the ticket is valid while `expiry >= now`.
     pub expiry: u32,
@@ -45,6 +53,7 @@ pub struct ServerTicket {
     pub transport: u8,
     /// Present if and only if `transport` is native.
     pub native_keys: Option<NativeKeys>,
+    /// Opaque backend metadata, bounded by `METADATA_MAX`.
     pub metadata: Vec<u8>,
 }
 
@@ -55,6 +64,7 @@ pub struct ServerKeyRing {
 }
 
 impl ServerKeyRing {
+    /// Creates a ring holding `k_gs` as the current key `current_id`.
     pub fn new(current_id: u8, k_gs: [u8; 32]) -> Self {
         Self {
             keys: vec![(current_id, k_ticket(&k_gs))],
@@ -76,6 +86,7 @@ impl ServerKeyRing {
         Ok(())
     }
 
+    /// Id of the key used by [`seal_server`].
     pub fn current_id(&self) -> u8 {
         self.current
     }

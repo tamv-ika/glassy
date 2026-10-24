@@ -6,6 +6,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use crate::Error;
 use crate::server_ticket::{SERVER_TICKET_BROWSER_MAX, SERVER_TICKET_MIN};
 
+/// Path prefix of the WebTransport CONNECT URL (spec §6.2).
 pub const WT_PATH_PREFIX: &str = "/glassy?t=";
 
 /// `ceil(394 * 4 / 3)` base64url characters for the largest browser ticket.

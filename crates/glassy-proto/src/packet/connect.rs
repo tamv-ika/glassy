@@ -33,13 +33,21 @@ fn arr_ref<const N: usize>(s: &[u8]) -> Result<&[u8; N], Error> {
 }
 
 #[derive(Debug)]
+/// Zero-copy view of a structurally valid `CONNECT` (spec §4.2); nothing is authenticated yet.
 pub struct ConnectView<'a> {
+    /// Session the client claims.
     pub session_id: [u8; 8],
+    /// Client-chosen connection id, bound into the proof and reply AAD.
     pub conn_id: [u8; 16],
+    /// Monotonic connect sequence number.
     pub connect_seq: u64,
+    /// Sealed routing ticket the gateway used for routing (spec §3.1).
     pub routing_ticket: &'a [u8; 60],
+    /// Sealed server ticket (spec §3.2).
     pub server_ticket: &'a [u8],
+    /// Proof-of-key tag over the signed prefix, keyed with `key_c2s`.
     pub proof_tag: &'a [u8; 16],
+    /// Trailing padding bytes; must be all zero.
     pub padding: &'a [u8],
     signed: &'a [u8],
 }
@@ -75,6 +83,7 @@ pub fn parse_connect(b: &[u8]) -> Result<ConnectView<'_>, Error> {
     })
 }
 
+/// Builds a `CONNECT` (spec §4.2), zero-padded to `pad_to` bytes (at most `MAX_PACKET`).
 pub fn build_connect(
     session_id: &[u8; 8],
     conn_id: &[u8; 16],
@@ -111,13 +120,19 @@ pub fn build_connect(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A `CONNECT` whose padding, ticket and proof have all been verified.
 pub struct VerifiedConnect {
+    /// Session id, equal to the ticket's.
     pub session_id: [u8; 8],
+    /// Connection id from the packet.
     pub conn_id: [u8; 16],
+    /// Connect sequence number from the packet.
     pub connect_seq: u64,
+    /// The opened server ticket.
     pub ticket: ServerTicket,
 }
 
+/// Verifies a `CONNECT` in the fixed order of spec §4.2: padding, ticket, session, proof.
 pub fn verify_connect(
     b: &[u8],
     ring: &ServerKeyRing,

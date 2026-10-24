@@ -46,35 +46,56 @@ const URL_MAX: usize = 1024;
 const URL_PREFIX: &str = "https://";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Native UDP endpoint data inside connect-info (spec §3.5).
 pub struct NativeInfo {
+    /// Gateway `host:port` addresses the client may send `CONNECT` to.
     pub gateways: Vec<String>,
+    /// Sealed routing ticket (spec §3.1), sent in every `CONNECT`.
     pub routing_ticket: [u8; 60],
+    /// Sealed server ticket (spec §3.2), opaque to the client.
     pub server_ticket: Vec<u8>,
+    /// Client-to-server packet key (spec §0.3).
     pub key_c2s: [u8; 32],
+    /// Server-to-client packet key (spec §0.3).
     pub key_s2c: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// WebRTC endpoint data inside connect-info (spec §3.5).
 pub struct WebRtcInfo {
+    /// ICE candidate lines for the game server.
     pub candidates: Vec<String>,
+    /// ICE username fragment; carries the routing ticket (spec §3.1).
     pub ice_ufrag: String,
+    /// ICE password derived from the server key and `ice_ufrag`.
     pub ice_pwd: String,
+    /// DTLS certificate fingerprint of the game server.
     pub dtls_fingerprint: String,
+    /// Sealed server ticket (spec §3.2), opaque to the client.
     pub server_ticket: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// WebTransport endpoint data inside connect-info (spec §3.5).
 pub struct WtInfo {
+    /// `https://` URL of the WebTransport endpoint.
     pub url: String,
+    /// SHA-256 of the server certificate, for certificate pinning.
     pub cert_sha256: [u8; 32],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Connect-info document the backend hands to the client (spec §3.5).
 pub struct ConnectInfo {
+    /// Session this connect-info belongs to.
     pub session_id: [u8; 8],
+    /// Unix seconds after which the tickets inside are no longer valid.
     pub expiry: u32,
+    /// Native transport data, if offered.
     pub native: Option<NativeInfo>,
+    /// WebRTC transport data, if offered.
     pub webrtc: Option<WebRtcInfo>,
+    /// WebTransport data, if offered.
     pub webtransport: Option<WtInfo>,
 }
 

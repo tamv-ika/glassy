@@ -19,10 +19,15 @@ pub use trailer::{ClientAddrV4, append_trailer, split_trailer};
 
 /// First byte of every native packet (spec §4.1).
 pub mod packet_type {
+    /// `CONNECT` (client to server).
     pub const CONNECT: u8 = 0x80;
+    /// `ACCEPT` (server to client).
     pub const ACCEPT: u8 = 0x81;
+    /// `DATA` (either direction).
     pub const DATA: u8 = 0x82;
+    /// `DISCONNECT` (either direction).
     pub const DISCONNECT: u8 = 0x83;
+    /// `REJECT` (server to client).
     pub const REJECT: u8 = 0x84;
 }
 

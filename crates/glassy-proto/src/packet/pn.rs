@@ -95,6 +95,7 @@ impl ReplayWindow {
             *w |= mask;
         }
     }
+    /// Largest packet number committed so far.
     pub fn largest(&self) -> u64 {
         self.largest
     }

@@ -1,4 +1,4 @@
-//! Native `ACCEPT` and `REJECT` packets (spec §4.3, §4.4).
+//! Native `ACCEPT` and `REJECT` packets (spec §4.3, §4.6).
 //!
 //! `type | session_id(8) | connect_seq(u64 BE) | server_nonce(16) | AEAD_s2c(body) | tag(16)`.
 //! The AEAD nonce is `server_nonce | 0⁸` and the AAD is the 33 header bytes followed by the
@@ -10,32 +10,50 @@ use crate::crypto::{packet_nonce, xchacha_open, xchacha_seal};
 
 /// `type | session_id | connect_seq | server_nonce`.
 const HEAD_LEN: usize = 33;
+/// Wire length of `ACCEPT` (spec §4.3).
 pub const ACCEPT_LEN: usize = 59;
+/// Wire length of `REJECT` (spec §4.6).
 pub const REJECT_LEN: usize = 58;
 
+/// `REJECT` reason codes (spec §4.6). Unknown values must be tolerated by receivers.
 pub mod reject_reason {
+    /// Server holds a newer `connect_seq` for this session.
     pub const STALE_CONNECT_SEQ: u8 = 1;
+    /// The session was taken over by another connection.
     pub const KICKED: u8 = 2;
+    /// The session is already closed.
     pub const SESSION_CLOSED: u8 = 3;
+    /// The server has no capacity for new sessions.
     pub const SERVER_FULL: u8 = 4;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Decoded `ACCEPT` (spec §4.3).
 pub struct Accept {
+    /// Session being accepted.
     pub session_id: [u8; 8],
+    /// Echo of the `CONNECT` sequence number being answered.
     pub connect_seq: u64,
+    /// Per-connection nonce prefix for all later server packets.
     pub server_nonce: [u8; 16],
+    /// True if an existing session was resumed rather than created.
     pub resumed: bool,
+    /// Server clock in Unix milliseconds, for client clock estimation.
     pub server_time_ms: u64,
 }
 
 /// `reason` keeps unknown byte values as received; mapping to SDK errors is SP2's job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reject {
+    /// Session being rejected.
     pub session_id: [u8; 8],
+    /// Echo of the `CONNECT` sequence number being answered.
     pub connect_seq: u64,
+    /// Fresh server nonce used to seal this reply.
     pub server_nonce: [u8; 16],
+    /// One of [`reject_reason`], kept as received.
     pub reason: u8,
+    /// Highest `connect_seq` the server has seen for the session.
     pub last_connect_seq: u64,
 }
 
@@ -99,6 +117,7 @@ fn open_reply(
     })
 }
 
+/// Seals an `ACCEPT` (spec §4.3). `conn_id` is bound as AAD but not sent.
 pub fn build_accept(a: &Accept, conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> [u8; ACCEPT_LEN] {
     let mut body = [0u8; 10];
     body[0] = u8::from(a.resumed);
@@ -138,6 +157,7 @@ pub fn peek_reply(b: &[u8]) -> Result<(u8, [u8; 8], u64), Error> {
     Ok((ty, session_id, seq))
 }
 
+/// Opens an `ACCEPT`, authenticating it against the `conn_id` of the `CONNECT` it answers.
 pub fn open_accept(b: &[u8], conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> Result<Accept, Error> {
     let o = open_reply(b, packet_type::ACCEPT, ACCEPT_LEN, conn_id, key_s2c)?;
     let p = o.body;
@@ -156,6 +176,7 @@ pub fn open_accept(b: &[u8], conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> Result<A
     })
 }
 
+/// Seals a `REJECT` (spec §4.6). `conn_id` is bound as AAD but not sent.
 pub fn build_reject(r: &Reject, conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> [u8; REJECT_LEN] {
     let mut body = [0u8; 9];
     body[0] = r.reason;
@@ -174,6 +195,7 @@ pub fn build_reject(r: &Reject, conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> [u8; 
     out
 }
 
+/// Opens a `REJECT`, authenticating it against the `conn_id` of the `CONNECT` it answers.
 pub fn open_reject(b: &[u8], conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> Result<Reject, Error> {
     let o = open_reply(b, packet_type::REJECT, REJECT_LEN, conn_id, key_s2c)?;
     let p = o.body;
