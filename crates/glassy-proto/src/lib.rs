@@ -4,6 +4,7 @@ pub mod consts;
 pub mod crypto;
 pub mod error;
 pub mod routing_ticket;
+pub mod server_ticket;
 pub mod varint;
 
 pub use consts::*;

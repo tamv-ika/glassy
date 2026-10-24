@@ -1,0 +1,204 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "key_c2s_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "key_s2c_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "metadata_hex": "6d657461",
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transport": 1,
+        "user_id": "user-1"
+      },
+      "name": "valid_native",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26100",
+      "via": 1
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "metadata_hex": "",
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transport": 2,
+        "user_id": "user-1"
+      },
+      "name": "valid_webrtc",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513f0b1bdead6a4",
+      "via": 2
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "metadata_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transport": 4,
+        "user_id": "uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+      },
+      "name": "valid_wt_max_size",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999fe5a06cd2414616ff9313c5366b874a47c4d114bcbc523d870dffff0ca5090a77c41327869adeb3782302658bb43bcee92629ad64b074442d169b65ce3e68ef5a5652bb69aadc694bf43e85f1be7b4888fc24fbe38eb615be5463be9a216145aa8a5a0b43d99054b3e22c27c1743370f97368f76728164a21902aed9b28acf80f3888b384850790edcfdbc8a3540323303c8d280d49d4a94a0d8c0cfb7d0e3f9e62e75489b122c9ee324ffa94589fc612968fc153114800d1bbec56ccac8a4a713235e39346e6cadffbbfb24d809edb564f967f1d7fa832d18fef16455aaa64d24f8ba41b117c1d330e4d661b44922e931b012f873c478e7c5185f68723d23463224e7276830e755ef641e95a4bacf7576b2a3fbfcca868f8f228ad07f28fab18d25b43c006b566ee1ff6768963b60bec84ab6079eb1055a2cc2e7031a917fe7b63dd47dfc4bb539ab84bde75444cfa5652d20d89582227c91aa852373a47222747b6e7dded47fa62788a48829eb525f",
+      "via": 4
+    },
+    {
+      "expect": {
+        "expiry": 2000000000,
+        "key_c2s_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+        "key_s2c_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+        "metadata_hex": "6d657461",
+        "server_id_hex": "abababababababababababababababab",
+        "session_id_hex": "0102030405060708",
+        "transport": 1,
+        "user_id": "user-1"
+      },
+      "name": "expiry_equals_now",
+      "now": 2000000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26100",
+      "via": 1
+    },
+    {
+      "error": "expired",
+      "name": "expired_by_one",
+      "now": 2000000001,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26100",
+      "via": 1
+    },
+    {
+      "error": "bad_length",
+      "name": "too_short_74",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513",
+      "via": 1
+    },
+    {
+      "error": "bad_length",
+      "name": "too_long_459",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999fe5a06cd2414616ff9313c5366b874a47c4d114bcbc523d870dffff0ca5090a77c41327869adeb3782302658bb43bcee92629ad64b074442d169b65ce3e68ef5a5652bb69aadc694bf43e85f1be7b4888fc24fbe38eb615be5463be9a213511eece0e6f37dd84708726f8c335f0a7d44c363d92122d036f1455ff086ead384ca86fcfc4e39200a7ca181c3f44c38494966acb5e6b5fd29f6cdb4afa1deb8dcc64881d9e531b9843745835b0ce72a5cc097d740a88baf38b4ad0971d9787b14169dacd2b4bee5e424793c7fa15a8a6d34fa66fb6c4d611bb48e6965f1c73936dc4a97d62cdb7ca9ba5683b204d62a42884fcf6e8509bf009eb36f2b1d004e53377c6bab6a227baf1ca9235ad0e6f98f3428edffa6a691ded6d975de852d7baae0a30a98112a407e47c7d8434db418409ff6758a3aa48a3d631af5d33628a24fd6b832d870f640bd30ad83b9e25647cfa47b323cc58f993a6587bd913661b762332df59d9990ed7417a8aa78454beda1a766e8df056c4dbd8df193a9f81c5d3789fbd5f2f27887b217d23278434b622a4491323979bdc8ecc66284ccc83b5b7d6b381ca2faf02409bbad2ec789707aa83b00",
+      "via": 1
+    },
+    {
+      "error": "bad_version",
+      "name": "bad_version",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0201999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26100",
+      "via": 1
+    },
+    {
+      "error": "unknown_key",
+      "name": "unknown_key",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0102999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26100",
+      "via": 1
+    },
+    {
+      "error": "auth_failed",
+      "name": "tampered",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470c589cda06b30117698a728ddfa353abe77a367573e058876dd2d7bfc4948ac4596453386a41bd16a1e5194a76719618e869bb3209b8645b28f747400ffdf1f7e239986e29424af7c094d08d3cc6e7262f39e6bae26101",
+      "via": 1
+    },
+    {
+      "error": "bad_user_id",
+      "name": "user_id_len_zero",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999be84d813facabfb127efe28db866aa7aa239663dbab550aa0dddbf11bf27e5d20934470ddc72c0487accff65a624ec2ee56697b6",
+      "via": 1
+    },
+    {
+      "error": "bad_user_id",
+      "name": "user_id_len_65",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999ff4e12d93000757bed25284772ac60b06859055fdfd137cc64cbebe4de4484b36855266c7db9ff239624324caf57a8fa86768ec25f135056c57da248f7f29ae1b1af2bb69aadc694bf43e85f1be7b4888f684cbf3fea625aea3979483612175aa880120bc335ad2fa0fc3fe86663852ccf",
+      "via": 1
+    },
+    {
+      "error": "bad_user_id",
+      "name": "user_id_not_utf8",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bcd08d13facabfb127efe28db866aa7aa293cf3fbcb352a803ad82f28ab1e5d00934ada3e018c582e628c4661010f6e0c059",
+      "via": 1
+    },
+    {
+      "error": "bad_transport",
+      "name": "transport_three",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bf4ed813facabfb127efe28db866aa7aa293653cbdb453ab02a2fdb02b25e6d209fa16d02687d05ced46f5a81d77efd267",
+      "via": 1
+    },
+    {
+      "error": "bad_length",
+      "name": "native_without_keys",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bf4ed813facabfb127efe28db866aa7aa293653cbdb453ab02a2fdb02b25e4d20967fd8020c0bcc20e32a59fce0de37f4f",
+      "via": 1
+    },
+    {
+      "error": "bad_metadata",
+      "name": "metadata_257",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bf4ed813facabfb127efe28db866aa7aa293653cbdb453ab02a2fdb02b25e7d30834470d1cd89e42f745532dce36c99be717efa33e723137a41cc3299693fb80d0ce801d31066d3f14e843f4b04c1f2324c34dbd3cee675ced310e7da212155aa8a4a2b7399c034c362bc8771b4e390087279d65669472b5011bb4c2ae97d19fd3a9a91b6c755f29f4d496a1196d1c1c33f9e0b3e0a87ca398e1faf48bedddc6a66f370bdf576ad9ab6db5e209c4b22e7939ae466541d65a43e79f379695faf873423c5a500b0aca97d2914fb46483da14881582a38ff55a60878b1f29d7d832a47938c235924754b86d5cea38c4ac66a121806be751ee705d81c5f3eea0bdd992854584cc9541f247cdb43e081761dac6031148487f3038379b306bc395440e4de44f71258462e91a831adbcad6371e31c3",
+      "via": 1
+    },
+    {
+      "error": "bad_length",
+      "name": "trailing_byte",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bf4ed813facabfb127efe28db866aa7aa293653cbdb453ab02a2fdb02b25e7d2093463c0416dc376742e77815fb628e1631f",
+      "via": 1
+    },
+    {
+      "error": "wrong_server",
+      "name": "wrong_server",
+      "now": 1900000000,
+      "self_server_id_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513f0b1bdead6a4",
+      "via": 2
+    },
+    {
+      "error": "bad_transport",
+      "name": "via_mismatch",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513f0b1bdead6a4",
+      "via": 1
+    },
+    {
+      "error": "wrong_server",
+      "name": "wrong_server_and_expired",
+      "now": 2000000001,
+      "self_server_id_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513f0b1bdead6a4",
+      "via": 2
+    },
+    {
+      "error": "expired",
+      "name": "expired_and_via_mismatch",
+      "now": 2000000001,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999b85a00dd234c25b127efe28db866aa7aa293cf95151bfdac07a98e80b922eda53ca0470f1cd8360d4439d25c68b12513f0b1bdead6a4",
+      "via": 1
+    }
+  ]
+}
