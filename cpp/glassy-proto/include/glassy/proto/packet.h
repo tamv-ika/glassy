@@ -149,7 +149,7 @@ struct VerifiedConnect {
 // (open_server_ticket errors pass through, transport native), session match
 // (kSessionMismatch), proof (kAuthFailed).
 Result<VerifiedConnect> verify_connect(std::span<const uint8_t> packet, const ServerKeyRing& ring,
-                                       const std::array<uint8_t, 16>& self_server_id, uint32_t now);
+                                       uint32_t now, const std::array<uint8_t, 16>& self_server_id);
 
 std::array<uint8_t, kAcceptLen> build_accept(const Accept& a,
                                              const std::array<uint8_t, 16>& conn_id,

@@ -2442,8 +2442,8 @@ fn np_run(c: &Value) -> Result<Value, Error> {
             let v = verify_connect(
                 &b,
                 &st_ring(),
-                &np_arr(c, "self_server_id_hex"),
                 c["now"].as_u64().unwrap() as u32,
+                &np_arr(c, "self_server_id_hex"),
             )?;
             Ok(json!({
                 "session_id_hex": hex::encode(v.session_id),

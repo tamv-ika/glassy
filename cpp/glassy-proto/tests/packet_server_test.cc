@@ -41,7 +41,7 @@ TEST(PacketsServer, Vectors) {
     SCOPED_TRACE(name);
     if (packet == "connect" && op == "verify") {
       auto r = verify_connect(hex(c["packet_hex"].get<std::string>()), ring,
-                              arr<16>(c, "self_server_id_hex"), c["now"].get<uint32_t>());
+                              c["now"].get<uint32_t>(), arr<16>(c, "self_server_id_hex"));
       if (c.contains("error")) {
         ASSERT_FALSE(r.ok());
         EXPECT_STREQ(error_code(r.error()), c["error"].get<std::string>().c_str());

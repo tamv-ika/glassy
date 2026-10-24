@@ -43,7 +43,7 @@
 //! // Client -> server: CONNECT, padded to 1200 bytes.
 //! let connect =
 //!     build_connect(&session_id, &conn_id, 1, &routing, &ticket, &key_c2s, 1200).unwrap();
-//! let verified = verify_connect(&connect, &server_ring, &server_id, now).unwrap();
+//! let verified = verify_connect(&connect, &server_ring, now, &server_id).unwrap();
 //! assert_eq!(verified.session_id, session_id);
 //!
 //! // Server -> client: ACCEPT.

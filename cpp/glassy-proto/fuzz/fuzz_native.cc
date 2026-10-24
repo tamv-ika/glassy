@@ -51,7 +51,7 @@ void check_connect(std::span<const uint8_t> in) {
     require(v.signed_prefix.size() + 16 + v.padding.size() == in.size());
     require(v.signed_prefix.size() == 96 + v.server_ticket.size());
   }
-  auto vc = verify_connect(in, ring(), kServerId, kNow);
+  auto vc = verify_connect(in, ring(), kNow, kServerId);
   if (vc.ok()) {
     require(p.ok());
     for (uint8_t b : p.value().padding) require(b == 0);

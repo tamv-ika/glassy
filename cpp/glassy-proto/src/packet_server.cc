@@ -6,8 +6,8 @@
 namespace glassy::proto {
 
 Result<VerifiedConnect> verify_connect(std::span<const uint8_t> b, const ServerKeyRing& ring,
-                                       const std::array<uint8_t, 16>& self_server_id,
-                                       uint32_t now) {
+                                       uint32_t now,
+                                       const std::array<uint8_t, 16>& self_server_id) {
   auto parsed = parse_connect(b);
   if (!parsed.ok()) return parsed.error();
   const ConnectView& v = parsed.value();

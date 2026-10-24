@@ -22,7 +22,7 @@ fn check(packet: &[u8], ring: &ServerKeyRing) {
         );
         assert_eq!(&packet[2..10], v.session_id);
     }
-    if let Ok(vc) = verify_connect(packet, ring, &SERVER_ID, NOW) {
+    if let Ok(vc) = verify_connect(packet, ring, NOW, &SERVER_ID) {
         let v = parse_connect(packet).expect("verified CONNECT must parse");
         assert_eq!(vc.session_id, v.session_id);
         assert_eq!(vc.ticket.session_id, v.session_id);

@@ -180,7 +180,7 @@ fn every_prefix_is_rejected_native_packets() {
                 let now = c["now"].as_u64().unwrap() as u32;
                 // A trailing 0x00 is valid CONNECT padding, so no extension check.
                 sweep_padded(name, &hex_of(&c, "packet_hex"), |b| {
-                    verify_connect(b, &st_ring(), &sid, now).map(|_| ())
+                    verify_connect(b, &st_ring(), now, &sid).map(|_| ())
                 });
             }
             ("connect", "split_trailer") => {

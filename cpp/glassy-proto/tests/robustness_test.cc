@@ -263,7 +263,7 @@ TEST(Robustness, EveryPrefixIsRejectedServerTicketAndVerifyConnect) {
     const auto sid = arr<16>(c, "self_server_id_hex");
     const uint32_t now = c["now"].get<uint32_t>();
     sweep_padded(name, hex_of(c, "packet_hex"),
-                 [&](auto b) { return verify_connect(b, ring, sid, now).ok(); });
+                 [&](auto b) { return verify_connect(b, ring, now, sid).ok(); });
   }
 }
 

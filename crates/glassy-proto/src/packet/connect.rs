@@ -136,8 +136,8 @@ pub struct VerifiedConnect {
 pub fn verify_connect(
     b: &[u8],
     ring: &ServerKeyRing,
-    self_server_id: &[u8; 16],
     now: u32,
+    self_server_id: &[u8; 16],
 ) -> Result<VerifiedConnect, Error> {
     let v = parse_connect(b)?;
     // Padding first: it is cheap and rejects a trailer that was never split off.
@@ -219,7 +219,7 @@ mod tests {
     }
 
     fn verify(b: &[u8]) -> Result<VerifiedConnect, Error> {
-        verify_connect(b, &ring(), &SID, NOW)
+        verify_connect(b, &ring(), NOW, &SID)
     }
 
     #[test]
@@ -335,7 +335,7 @@ mod tests {
         let mut b = build(&native_ticket(), 0);
         b[96] ^= 0xff; // ticket version byte
         assert_eq!(verify(&b).err(), Some(Error::BadVersion));
-        let wrong = verify_connect(&build(&native_ticket(), 0), &ring(), &[0xcd; 16], NOW);
+        let wrong = verify_connect(&build(&native_ticket(), 0), &ring(), NOW, &[0xcd; 16]);
         assert_eq!(wrong.err(), Some(Error::WrongServer));
     }
 

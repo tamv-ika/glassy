@@ -365,7 +365,7 @@ Quy ước cửa sổ (sửa lỗi lệch 1 trong câu của spec §4.1, Task 22
   - `pub fn parse_connect(b: &[u8]) -> Result<ConnectView<'_>, Error>`: không cấp phát; gateway dùng.
   - `pub fn build_connect(session_id: &[u8; 8], conn_id: &[u8; 16], connect_seq: u64, routing_ticket: &[u8; 60], server_ticket: &[u8], key_c2s: &[u8; 32], pad_to: usize) -> Result<Vec<u8>, Error>`: `pad_to` = 0 nghĩa là không padding. `pad_to` > 1200 → `TooLarge`; `pad_to` nhỏ hơn độ dài tự nhiên thì bỏ qua.
   - `pub struct VerifiedConnect { pub session_id: [u8; 8], pub conn_id: [u8; 16], pub connect_seq: u64, pub ticket: ServerTicket }`.
-  - `pub fn verify_connect(b: &[u8], ring: &ServerKeyRing, self_server_id: &[u8; 16], now: u32) -> Result<VerifiedConnect, Error>`.
+  - `pub fn verify_connect(b: &[u8], ring: &ServerKeyRing, now: u32, self_server_id: &[u8; 16]) -> Result<VerifiedConnect, Error>`.
   - `pub struct ClientAddrV4 { pub ip: [u8; 4], pub port: u16 }`, `pub fn split_trailer(b: &[u8]) -> Result<(&[u8], ClientAddrV4), Error>`, `pub fn append_trailer(b: &mut Vec<u8>, a: ClientAddrV4)`.
 
 Thứ tự kiểm tra trong `parse_connect`:
@@ -679,7 +679,7 @@ Schema `wt_framing.json`:
     - `Result<size_t> seal_data(key, server_nonce, session_id, pn, span frames, span out)`, `Result<size_t> open_data(key, server_nonce, span packet, uint64_t pn, span out)`;
     - `seal_disconnect` / `open_disconnect`.
   - Server:
-    - `Result<VerifiedConnect> verify_connect(span, const ServerKeyRing&, self_server_id, uint32_t now)`;
+    - `Result<VerifiedConnect> verify_connect(span, const ServerKeyRing&, uint32_t now, self_server_id)`;
     - `std::array<uint8_t,59> build_accept(const Accept&, conn_id, key_s2c)`, `std::array<uint8_t,58> build_reject(…)`.
 
 - [ ] **Step 1: Viết test thất bại.**
