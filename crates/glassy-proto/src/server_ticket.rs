@@ -12,6 +12,8 @@ use crate::{Error, transport};
 pub const SERVER_TICKET_MIN: usize = 75;
 pub const SERVER_TICKET_MAX: usize = 458;
 pub const SERVER_TICKET_NATIVE_MIN: usize = 139;
+/// WebRTC/WebTransport tickets carry no native keys (spec §3.2), hence the smaller maximum.
+pub const SERVER_TICKET_BROWSER_MAX: usize = 394;
 
 const VERSION: u8 = 1;
 /// `ver | key_id`, also the AAD.

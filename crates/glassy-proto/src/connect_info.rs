@@ -29,7 +29,9 @@ use serde_json::value::RawValue;
 use crate::Error;
 use crate::MAX_CONNECT_INFO_JSON;
 use crate::routing_ticket::ROUTING_TICKET_LEN;
-use crate::server_ticket::{SERVER_TICKET_MIN, SERVER_TICKET_NATIVE_MIN};
+use crate::server_ticket::{
+    SERVER_TICKET_BROWSER_MAX, SERVER_TICKET_MIN, SERVER_TICKET_NATIVE_MIN,
+};
 
 /// `ceil(4096 * 4 / 3)`: the longest base64url text that can hold [`MAX_CONNECT_INFO_JSON`].
 const MAX_B64_LEN: usize = 5462;
@@ -37,8 +39,6 @@ const MAX_DEPTH: usize = 8;
 const MAX_ADDRS: usize = 4;
 const MAX_ADDR_LEN: usize = 64;
 const NATIVE_TICKET_MAX: usize = 458;
-/// WebRTC/WebTransport tickets carry no native keys (spec §3.2).
-const BROWSER_TICKET_MAX: usize = 394;
 const UFRAG_LEN: usize = 80;
 const PWD_LEN: usize = 43;
 const FINGERPRINT_MAX: usize = 128;
@@ -456,7 +456,11 @@ fn check_webrtc(w: WebRtcReq<'_>) -> Result<WebRtcInfo, Error> {
         ice_ufrag: w.ice_ufrag.to_string(),
         ice_pwd: w.ice_pwd.to_string(),
         dtls_fingerprint: fp.to_string(),
-        server_ticket: b64_ticket(w.server_ticket, SERVER_TICKET_MIN, BROWSER_TICKET_MAX)?,
+        server_ticket: b64_ticket(
+            w.server_ticket,
+            SERVER_TICKET_MIN,
+            SERVER_TICKET_BROWSER_MAX,
+        )?,
     })
 }
 

@@ -6,11 +6,13 @@ pub mod crypto;
 pub mod error;
 pub mod frame;
 pub mod ice;
+pub mod message;
 pub mod packet;
 pub mod retry;
 pub mod routing_ticket;
 pub mod server_ticket;
 pub mod varint;
+pub mod wt;
 
 pub use consts::*;
 pub use error::Error;

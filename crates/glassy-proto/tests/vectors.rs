@@ -14,6 +14,7 @@ use glassy_proto::connect_info::{
 use glassy_proto::crypto::{k_ticket, packet_nonce, xchacha_seal};
 use glassy_proto::frame::{Frame, decode_frames, encode_frame};
 use glassy_proto::ice::ice_pwd;
+use glassy_proto::message::{MessageHeader, decode_message_header, encode_message_header};
 use glassy_proto::packet::pn::{ReplayWindow, decode_pn};
 use glassy_proto::packet::{
     Accept, ClientAddrV4, Reject, append_trailer, build_accept, build_connect, build_reject,
@@ -28,6 +29,7 @@ use glassy_proto::routing_ticket::{
 use glassy_proto::server_ticket::{
     NativeKeys, ServerKeyRing, ServerTicket, open_server, seal_server,
 };
+use glassy_proto::wt::{WT_PATH_PREFIX, parse_wt_path, wt_path};
 use glassy_proto::{Error, transport, varint};
 use serde_json::{Value, json};
 
@@ -2639,6 +2641,12 @@ fn fr_datagram_bytes(data: &[u8]) -> Vec<u8> {
     v
 }
 
+fn fr_datagram_header(len: u64) -> Vec<u8> {
+    let mut v = vec![0x03];
+    v.extend(fr_varint(len));
+    v
+}
+
 fn fr_cases() -> Vec<FrCase> {
     let cat = |parts: &[Vec<u8>]| parts.concat();
     let sparse = 0xFFFF_FFFF_00FF_FE00u64;
@@ -2680,6 +2688,12 @@ fn fr_cases() -> Vec<FrCase> {
         FrCase {
             name: "datagram_1101",
             plaintext: fr_datagram_bytes(&[0xd1; 1101]),
+            result: Err(Error::TooLarge),
+        },
+        FrCase {
+            // Short data must not mask the length-limit error: the limit is checked first.
+            name: "datagram_1101_short_data",
+            plaintext: cat(&[fr_datagram_header(1101), vec![0xd1; 5]]),
             result: Err(Error::TooLarge),
         },
         FrCase {
@@ -2733,6 +2747,12 @@ fn fr_cases() -> Vec<FrCase> {
         FrCase {
             name: "stream_offset_overflow",
             plaintext: cat(&[vec![0x02], fr_varint(max), vec![0x01, 0xaa]]),
+            result: Err(Error::ValueTooLarge),
+        },
+        FrCase {
+            // offset + len > 2^62 - 1 is reported even though the data bytes are missing.
+            name: "stream_overflow_short_data",
+            plaintext: cat(&[vec![0x02], fr_varint(max), fr_varint(2), vec![0xaa]]),
             result: Err(Error::ValueTooLarge),
         },
         FrCase {
@@ -2813,6 +2833,215 @@ fn check_frames_vectors() {
                 }
                 assert_eq!(again, plaintext, "{name}");
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- wt_framing.json
+
+const WF_FILE: &str = "wt_framing.json";
+
+/// Outcome of a `kind: "stream"` case: messages plus the unconsumed tail, or an error.
+type WfStream = Result<(Vec<Vec<u8>>, Vec<u8>), Error>;
+
+enum WfCase {
+    Stream(&'static str, Vec<u8>, WfStream),
+    Path(&'static str, String, Result<Vec<u8>, Error>),
+}
+
+fn wf_msg(payload: &[u8]) -> Vec<u8> {
+    let mut v = Vec::new();
+    encode_message_header(payload.len(), &mut v).unwrap_or_else(|e| panic!("header: {e}"));
+    v.extend_from_slice(payload);
+    v
+}
+
+fn wf_ticket(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
+fn wf_path_of(ticket: &[u8]) -> String {
+    format!("{WT_PATH_PREFIX}{}", URL_SAFE_NO_PAD.encode(ticket))
+}
+
+fn wf_cases() -> Vec<WfCase> {
+    use WfCase::{Path, Stream};
+    let two = [wf_msg(b"abc"), wf_msg(b"de")].concat();
+    let tail = [wf_msg(b"abc"), vec![0x05, 0x01, 0x02]].concat();
+    let ok = |msgs: &[&[u8]], rest: &[u8]| {
+        Ok((msgs.iter().map(|m| m.to_vec()).collect(), rest.to_vec()))
+    };
+    vec![
+        Stream("stream_two_messages", two, ok(&[b"abc", b"de"], &[])),
+        Stream(
+            "stream_partial_tail",
+            tail,
+            ok(&[b"abc"], &[0x05, 0x01, 0x02]),
+        ),
+        Stream("stream_empty_message", vec![0x00], ok(&[b""], &[])),
+        Stream(
+            "stream_partial_varint",
+            vec![0x01, b'x', 0x40],
+            ok(&[b"x"], &[0x40]),
+        ),
+        Stream(
+            "stream_len_262144_awaiting_body",
+            vec![0x80, 0x04, 0x00, 0x00, 0xaa],
+            ok(&[], &[0x80, 0x04, 0x00, 0x00, 0xaa]),
+        ),
+        Stream(
+            "stream_len_262145",
+            vec![0x80, 0x04, 0x00, 0x01],
+            Err(Error::TooLarge),
+        ),
+        Stream(
+            "stream_noncanonical_len",
+            vec![0x40, 0x05, 1, 2, 3, 4, 5],
+            Err(Error::NonCanonicalVarint),
+        ),
+        Stream(
+            "stream_error_after_good_message",
+            [wf_msg(b"ok"), vec![0x80, 0x04, 0x00, 0x01]].concat(),
+            Err(Error::TooLarge),
+        ),
+        Path(
+            "path_valid",
+            wf_path_of(&wf_ticket(144)),
+            Ok(wf_ticket(144)),
+        ),
+        Path("path_min", wf_path_of(&wf_ticket(75)), Ok(wf_ticket(75))),
+        Path("path_max", wf_path_of(&wf_ticket(394)), Ok(wf_ticket(394))),
+        Path(
+            "path_537",
+            format!("{WT_PATH_PREFIX}{}", "A".repeat(527)),
+            Err(Error::TooLarge),
+        ),
+        Path(
+            "path_wrong_prefix",
+            format!("/other?t={}", URL_SAFE_NO_PAD.encode(wf_ticket(144))),
+            Err(Error::BadEncoding),
+        ),
+        Path(
+            "path_extra_param",
+            format!("{}&x=1", wf_path_of(&wf_ticket(144))),
+            Err(Error::BadEncoding),
+        ),
+        Path(
+            "path_fragment",
+            format!("{}#f", wf_path_of(&wf_ticket(144))),
+            Err(Error::BadEncoding),
+        ),
+        Path(
+            "path_padded_base64",
+            format!("{WT_PATH_PREFIX}{}", STANDARD.encode(wf_ticket(76))),
+            Err(Error::BadEncoding),
+        ),
+        Path(
+            "path_ticket_too_short",
+            wf_path_of(&wf_ticket(74)),
+            Err(Error::BadLength),
+        ),
+        Path(
+            // 395 bytes encode to 527 characters, so the path-length check fires first.
+            "path_ticket_395",
+            wf_path_of(&wf_ticket(395)),
+            Err(Error::TooLarge),
+        ),
+    ]
+}
+
+/// Splits `stream` into messages. The C++ port mirrors this loop exactly:
+/// repeat `decode_message_header(rest)`: `NeedMore` -> stop; error -> the whole case is that
+/// error (messages already sliced are discarded); `Ready` -> if fewer than `header_len + len`
+/// bytes remain stop, else slice out the payload and continue. `rest` at the stop is the
+/// remainder.
+fn wf_split(stream: &[u8]) -> WfStream {
+    let mut rest = stream;
+    let mut msgs = Vec::new();
+    loop {
+        match decode_message_header(rest)? {
+            MessageHeader::NeedMore => break,
+            MessageHeader::Ready { len, header_len } => {
+                let Some(payload) = rest.get(header_len..header_len + len) else {
+                    break;
+                };
+                msgs.push(payload.to_vec());
+                rest = &rest[header_len + len..];
+            }
+        }
+    }
+    Ok((msgs, rest.to_vec()))
+}
+
+#[test]
+#[ignore = "regenerates vectors/wt_framing.json"]
+fn write_wt_framing_vectors() {
+    let cases: Vec<Value> = wf_cases()
+        .iter()
+        .map(|c| match c {
+            WfCase::Stream(name, stream, Ok((msgs, rest))) => json!({
+                "name": name, "kind": "stream", "stream_hex": hex::encode(stream),
+                "expect": {
+                    "messages_hex": msgs.iter().map(hex::encode).collect::<Vec<_>>(),
+                    "remainder_hex": hex::encode(rest),
+                },
+            }),
+            WfCase::Stream(name, stream, Err(e)) => json!({
+                "name": name, "kind": "stream", "stream_hex": hex::encode(stream),
+                "error": e.code(),
+            }),
+            WfCase::Path(name, path, Ok(t)) => json!({
+                "name": name, "kind": "path", "path": path,
+                "expect": {"ticket_hex": hex::encode(t)},
+            }),
+            WfCase::Path(name, path, Err(e)) => json!({
+                "name": name, "kind": "path", "path": path, "error": e.code(),
+            }),
+        })
+        .collect();
+    common::write_vectors(WF_FILE, &json!({ "cases": cases }));
+}
+
+#[test]
+fn check_wt_framing_vectors() {
+    let file = common::read_vectors(WF_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), wf_cases().len());
+    let mut names = std::collections::HashSet::new();
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        assert!(names.insert(name), "duplicate case name {name}");
+        let got: Result<Value, Error> = match c["kind"].as_str().unwrap() {
+            "stream" => {
+                let stream = hex::decode(c["stream_hex"].as_str().unwrap()).unwrap();
+                wf_split(&stream).map(|(msgs, rest)| {
+                    json!({
+                        "messages_hex": msgs.iter().map(hex::encode).collect::<Vec<_>>(),
+                        "remainder_hex": hex::encode(rest),
+                    })
+                })
+            }
+            "path" => {
+                let path = c["path"].as_str().unwrap();
+                parse_wt_path(path).map(|t| {
+                    // Canonical: rebuilding the path reproduces the input.
+                    assert_eq!(wt_path(&t).as_deref(), Ok(path), "{name}");
+                    json!({"ticket_hex": hex::encode(t)})
+                })
+            }
+            other => panic!("{name}: unknown kind {other}"),
+        };
+        match c.get("error") {
+            Some(code) => assert_eq!(
+                got.map(|_| ()).map_err(|e| e.code()),
+                Err(code.as_str().unwrap()),
+                "{name}"
+            ),
+            None => assert_eq!(
+                got.unwrap_or_else(|e| panic!("{name}: {e}")),
+                c["expect"],
+                "{name}"
+            ),
         }
     }
 }

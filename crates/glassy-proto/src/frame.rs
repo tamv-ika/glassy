@@ -86,7 +86,8 @@ fn encode_into(f: &Frame, out: &mut Vec<u8>) -> Result<(), Error> {
 }
 
 fn check_stream_end(offset: u64, len: u64) -> Result<(), Error> {
-    // Both operands are at most 2^62 - 1 here, so the sum cannot overflow u64.
+    // The encoder path may pass any u64 offset, so the sum must saturate rather than wrap;
+    // saturating at u64::MAX still exceeds the limit and is rejected.
     if offset.saturating_add(len) > varint::MAX {
         return Err(Error::ValueTooLarge);
     }
