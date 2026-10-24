@@ -139,7 +139,7 @@ Mỗi sub-project đi qua một vòng spec → plan → implement riêng.
 | Key | Ai giữ | Dùng cho | Xoay vòng |
 |---|---|---|---|
 | `K_gw` | broker, gateway | mã hoá routing ticket bằng **AES-128-GCM** | key ring có `key_id` 1 byte; gateway chấp nhận key hiện tại và key trước đó |
-| `K_gs[fleet]` | broker, game server của fleet đó (k8s Secret mount vào pod) | mã hoá server ticket bằng **ChaCha20-Poly1305 (RFC 8439)**; dẫn xuất ICE pwd | có `key_id`; server SDK đọc lại file khi Secret thay đổi |
+| `K_gs[fleet]` | broker, game server của fleet đó (k8s Secret mount vào pod) | mã hoá server ticket bằng **XChaCha20-Poly1305** với `K_ticket` = HKDF-SHA256(`K_gs`, info `glassy-server-ticket`); dẫn xuất ICE pwd bằng HKDF-SHA256(`K_gs`, info `glassy-ice`) rồi HMAC-SHA256 trên ufrag | có `key_id`; server SDK đọc lại file khi Secret thay đổi |
 | `K_retry_gw` | **chỉ gateway** | xác thực phần opaque của token Retry no-shared-state (HMAC-SHA256) | gateway tự sinh và tự xoay; chấp nhận key hiện tại và trước đó |
 | Session key `c2s` / `s2c` | client, game server | mã hoá E2E cho native UDP | mỗi session một cặp, broker sinh ngẫu nhiên 32 byte |
 | Cert DTLS | game server tự sinh | fingerprint SHA-256 trong SDP | sinh khi khởi động |
