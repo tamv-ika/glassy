@@ -1,0 +1,5 @@
+/target
+/build*
+crates/glassy-proto/fuzz/target
+crates/glassy-proto/fuzz/corpus
+crates/glassy-proto/fuzz/artifacts

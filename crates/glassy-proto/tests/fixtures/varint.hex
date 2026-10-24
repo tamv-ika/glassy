@@ -1,0 +1,7 @@
+# RFC 9000 Appendix A.1
+eight_byte_151288809941952652: c2197c5eff14e88c
+four_byte_494878333: 9d7f3e7d
+two_byte_15293: 7bbd
+one_byte_37: 25
+# Valid in RFC 9000, rejected by glassy as non-canonical.
+two_byte_37_non_canonical: 4025

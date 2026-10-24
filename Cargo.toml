@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["crates/glassy-proto/fuzz", "spikes"]
+
+[profile.dev]
+# Line tables are enough for backtraces and cut linker memory substantially.
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+# Dependencies do not need debug info.
+debug = false

@@ -1,0 +1,3 @@
+[build]
+# rustc and the linker are the main OOM risks; override with CARGO_BUILD_JOBS.
+jobs = 2
