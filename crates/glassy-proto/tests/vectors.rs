@@ -7,6 +7,8 @@ mod common;
 use aes_gcm::aead::AeadInOut;
 use aes_gcm::{Aes128Gcm, KeyInit};
 use glassy_proto::crypto::{k_ticket, xchacha_seal};
+use glassy_proto::ice::ice_pwd;
+use glassy_proto::retry::{mint_retry_token, retry_token_odcid, validate_retry_token};
 use glassy_proto::routing_ticket::{
     RoutingKeyRing, RoutingTicket, from_sni, from_ufrag, open_routing, seal_routing, to_sni_labels,
     to_ufrag,
@@ -618,6 +620,279 @@ fn check_server_ticket_vectors() {
                     "{name}"
                 );
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- ice_pwd.json
+
+const ICE_FILE: &str = "ice_pwd.json";
+
+/// `spike_evtj` and `spike_evtk` are Python-verified values carried over from the spike.
+const ICE_CASES: [(&str, &str); 4] = [
+    ("spike_evtj", "evtj"),
+    ("spike_evtk", "evtk"),
+    ("single_char", "a"),
+    ("long_ufrag", "abcdefghijklmnopqrstuvwxyz012345"),
+];
+
+#[test]
+#[ignore = "regenerates vectors/ice_pwd.json"]
+fn write_ice_pwd_vectors() {
+    let cases: Vec<Value> = ICE_CASES
+        .iter()
+        .map(|(name, ufrag)| {
+            json!({
+                "name": name,
+                "k_gs_hex": hex::encode([0x22u8; 32]),
+                "ufrag": ufrag,
+                "pwd": ice_pwd(&[0x22; 32], ufrag),
+            })
+        })
+        .collect();
+    common::write_vectors(ICE_FILE, &json!({ "cases": cases }));
+}
+
+#[test]
+fn check_ice_pwd_vectors() {
+    let file = common::read_vectors(ICE_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), ICE_CASES.len());
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let k: [u8; 32] = hex::decode(c["k_gs_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let pwd = ice_pwd(&k, c["ufrag"].as_str().unwrap());
+        assert_eq!(pwd, c["pwd"].as_str().unwrap(), "{name}");
+        assert_eq!(pwd.len(), 43, "{name}");
+    }
+    let by_name = |n: &str| {
+        cases
+            .iter()
+            .find(|c| c["name"] == n)
+            .map(|c| c["pwd"].as_str().unwrap().to_string())
+    };
+    assert_eq!(
+        by_name("spike_evtj").as_deref(),
+        Some("80zK66GjJqCxXOeI6qiO7Tyrn/sory+Ra/31l+h0e60")
+    );
+    assert_eq!(
+        by_name("spike_evtk").as_deref(),
+        Some("A1/6J7XGHgokNUcZqm7BhqrgquS1iyt13K4ph1Ian4o")
+    );
+}
+
+// ---------------------------------------------------------------- retry_token.json
+
+const RETRY_FILE: &str = "retry_token.json";
+const RETRY_KEY: [u8; 32] = [0x33; 32];
+const RETRY_NOW: u64 = 1_900_000_000;
+const RETRY_EXPIRY: u64 = 2_000_000_000;
+const RETRY_CLIENT4: &str = "203.0.113.7:4433";
+const RETRY_CLIENT6: &str = "[2001:db8::7]:4433";
+const RETRY_ODCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+const RETRY_RSCID: [u8; 8] = [0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5];
+
+struct RetryCase {
+    name: &'static str,
+    token: Vec<u8>,
+    client: &'static str,
+    dcid: Vec<u8>,
+    now: u64,
+    /// True for "parse" mode (no tag or expiry check).
+    parse: bool,
+    expect: Result<Vec<u8>, Error>,
+}
+
+fn retry_mint(odcid: &[u8], client: &str, expiry: u64) -> Vec<u8> {
+    mint_retry_token(
+        &RETRY_KEY,
+        odcid,
+        client.parse().unwrap(),
+        &RETRY_RSCID,
+        expiry,
+    )
+    .unwrap()
+}
+
+fn retry_cases() -> Vec<RetryCase> {
+    let v4 = retry_mint(&RETRY_ODCID, RETRY_CLIENT4, RETRY_EXPIRY);
+    let v6 = retry_mint(&RETRY_ODCID, RETRY_CLIENT6, RETRY_EXPIRY);
+    let case = |name, token: &[u8], client, now, expect: Result<Vec<u8>, Error>| RetryCase {
+        name,
+        token: token.to_vec(),
+        client,
+        dcid: RETRY_RSCID.to_vec(),
+        now,
+        parse: false,
+        expect,
+    };
+    let ok = Ok(RETRY_ODCID.to_vec());
+    let mut v = vec![
+        case("valid_ipv4", &v4, RETRY_CLIENT4, RETRY_NOW, ok.clone()),
+        case("valid_ipv6", &v6, RETRY_CLIENT6, RETRY_NOW, ok.clone()),
+        case("expiry_equals_now", &v4, RETRY_CLIENT4, RETRY_EXPIRY, ok),
+        case(
+            "expired_by_one",
+            &v4,
+            RETRY_CLIENT4,
+            RETRY_EXPIRY + 1,
+            Err(Error::Expired),
+        ),
+        case(
+            "empty",
+            &[],
+            RETRY_CLIENT4,
+            RETRY_NOW,
+            Err(Error::BadLength),
+        ),
+    ];
+    let mut type_bit = v4.clone();
+    type_bit[0] |= 0x80;
+    v.push(case(
+        "type_bit_set",
+        &type_bit,
+        RETRY_CLIENT4,
+        RETRY_NOW,
+        Err(Error::BadTokenType),
+    ));
+    // ODCIL out of range: byte0 is rewritten, the rest keeps the 8-byte token's shape.
+    for (name, odcil) in [("odcil_7", 7u8), ("odcil_21", 21u8)] {
+        let mut t = v4.clone();
+        t[0] = odcil;
+        v.push(case(
+            name,
+            &t,
+            RETRY_CLIENT4,
+            RETRY_NOW,
+            Err(Error::BadOdcil),
+        ));
+    }
+    v.push(case(
+        "length_mismatch",
+        &v4[..v4.len() - 1],
+        RETRY_CLIENT4,
+        RETRY_NOW,
+        Err(Error::BadLength),
+    ));
+    v.push(case(
+        "wrong_client_port",
+        &v4,
+        "203.0.113.7:4434",
+        RETRY_NOW,
+        Err(Error::AuthFailed),
+    ));
+    v.push(RetryCase {
+        dcid: RETRY_ODCID.to_vec(),
+        ..case(
+            "wrong_dcid",
+            &v4,
+            RETRY_CLIENT4,
+            RETRY_NOW,
+            Err(Error::AuthFailed),
+        )
+    });
+    let mut bad_tag = v4.clone();
+    let last = bad_tag.len() - 1;
+    bad_tag[last] ^= 1;
+    v.push(RetryCase {
+        parse: true,
+        ..case(
+            "parse_only_bad_tag",
+            &bad_tag,
+            RETRY_CLIENT4,
+            RETRY_NOW,
+            Ok(RETRY_ODCID.to_vec()),
+        )
+    });
+    // Pins check order: a bad tag and an expired expiry together must report auth_failed.
+    v.push(case(
+        "bad_tag_and_expired",
+        &bad_tag,
+        RETRY_CLIENT4,
+        RETRY_EXPIRY + 1,
+        Err(Error::AuthFailed),
+    ));
+    v
+}
+
+fn retry_run(c: &RetryCase) -> Result<Vec<u8>, Error> {
+    if c.parse {
+        retry_token_odcid(&c.token).map(<[u8]>::to_vec)
+    } else {
+        validate_retry_token(
+            &RETRY_KEY,
+            &c.token,
+            c.client.parse().unwrap(),
+            &c.dcid,
+            c.now,
+        )
+        .map(<[u8]>::to_vec)
+    }
+}
+
+#[test]
+fn retry_cases_match_their_expectations() {
+    for c in retry_cases() {
+        assert_eq!(retry_run(&c), c.expect, "{}", c.name);
+    }
+}
+
+#[test]
+#[ignore = "regenerates vectors/retry_token.json"]
+fn write_retry_token_vectors() {
+    let cases: Vec<Value> = retry_cases()
+        .iter()
+        .map(|c| {
+            let mut m = serde_json::Map::new();
+            m.insert("name".into(), json!(c.name));
+            m.insert(
+                "mode".into(),
+                json!(if c.parse { "parse" } else { "validate" }),
+            );
+            m.insert("token_hex".into(), json!(hex::encode(&c.token)));
+            m.insert("client".into(), json!(c.client));
+            m.insert("dcid_hex".into(), json!(hex::encode(&c.dcid)));
+            m.insert("now".into(), json!(c.now));
+            match &c.expect {
+                Ok(odcid) => m.insert("expect".into(), json!({ "odcid_hex": hex::encode(odcid) })),
+                Err(e) => m.insert("error".into(), json!(e.code())),
+            };
+            Value::Object(m)
+        })
+        .collect();
+    common::write_vectors(RETRY_FILE, &json!({ "cases": cases }));
+}
+
+#[test]
+fn check_retry_token_vectors() {
+    let file = common::read_vectors(RETRY_FILE);
+    let cases = file["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), retry_cases().len());
+    for c in cases {
+        let name = c["name"].as_str().unwrap();
+        let token = hex::decode(c["token_hex"].as_str().unwrap()).unwrap();
+        let client: std::net::SocketAddr = c["client"].as_str().unwrap().parse().unwrap();
+        let dcid = hex::decode(c["dcid_hex"].as_str().unwrap()).unwrap();
+        let now = c["now"].as_u64().unwrap();
+        let got = match c["mode"].as_str().unwrap() {
+            "validate" => validate_retry_token(&RETRY_KEY, &token, client, &dcid, now),
+            "parse" => retry_token_odcid(&token),
+            m => panic!("{name}: unknown mode {m}"),
+        };
+        match c.get("error") {
+            Some(code) => assert_eq!(
+                got.map_err(|e| e.code()),
+                Err(code.as_str().unwrap()),
+                "{name}"
+            ),
+            None => assert_eq!(
+                hex::encode(got.unwrap_or_else(|e| panic!("{name}: {e}"))),
+                c["expect"]["odcid_hex"].as_str().unwrap(),
+                "{name}"
+            ),
         }
     }
 }

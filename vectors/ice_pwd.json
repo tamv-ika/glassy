@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "k_gs_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "name": "spike_evtj",
+      "pwd": "80zK66GjJqCxXOeI6qiO7Tyrn/sory+Ra/31l+h0e60",
+      "ufrag": "evtj"
+    },
+    {
+      "k_gs_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "name": "spike_evtk",
+      "pwd": "A1/6J7XGHgokNUcZqm7BhqrgquS1iyt13K4ph1Ian4o",
+      "ufrag": "evtk"
+    },
+    {
+      "k_gs_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "name": "single_char",
+      "pwd": "LJlZBGz11TqNFIf/9fAm3MnHZ9I7Z86Wo7Zl1TgrdOs",
+      "ufrag": "a"
+    },
+    {
+      "k_gs_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "name": "long_ufrag",
+      "pwd": "eauqs9RCaEWtquh9vn3KzKRnqlkO2N3mEvckgZqaid8",
+      "ufrag": "abcdefghijklmnopqrstuvwxyz012345"
+    }
+  ]
+}

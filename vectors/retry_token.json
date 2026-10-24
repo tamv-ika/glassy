@@ -1,0 +1,129 @@
+{
+  "cases": [
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "expect": {
+        "odcid_hex": "8394c8f03e515708"
+      },
+      "mode": "validate",
+      "name": "valid_ipv4",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "[2001:db8::7]:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "expect": {
+        "odcid_hex": "8394c8f03e515708"
+      },
+      "mode": "validate",
+      "name": "valid_ipv6",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594003417944a4c408f4f132c073c733c73d9"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "expect": {
+        "odcid_hex": "8394c8f03e515708"
+      },
+      "mode": "validate",
+      "name": "expiry_equals_now",
+      "now": 2000000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "expired",
+      "mode": "validate",
+      "name": "expired_by_one",
+      "now": 2000000001,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "bad_length",
+      "mode": "validate",
+      "name": "empty",
+      "now": 1900000000,
+      "token_hex": ""
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "bad_token_type",
+      "mode": "validate",
+      "name": "type_bit_set",
+      "now": 1900000000,
+      "token_hex": "888394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "bad_odcil",
+      "mode": "validate",
+      "name": "odcil_7",
+      "now": 1900000000,
+      "token_hex": "078394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "bad_odcil",
+      "mode": "validate",
+      "name": "odcil_21",
+      "now": 1900000000,
+      "token_hex": "158394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "bad_length",
+      "mode": "validate",
+      "name": "length_mismatch",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b0"
+    },
+    {
+      "client": "203.0.113.7:4434",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "auth_failed",
+      "mode": "validate",
+      "name": "wrong_client_port",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "8394c8f03e515708",
+      "error": "auth_failed",
+      "mode": "validate",
+      "name": "wrong_dcid",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04f"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "expect": {
+        "odcid_hex": "8394c8f03e515708"
+      },
+      "mode": "parse",
+      "name": "parse_only_bad_tag",
+      "now": 1900000000,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04e"
+    },
+    {
+      "client": "203.0.113.7:4433",
+      "dcid_hex": "f067a5502a4262b5",
+      "error": "auth_failed",
+      "mode": "validate",
+      "name": "bad_tag_and_expired",
+      "now": 2000000001,
+      "token_hex": "088394c8f03e51570800000000773594006aad2518317c4320e1a412c886a7b04e"
+    }
+  ]
+}
