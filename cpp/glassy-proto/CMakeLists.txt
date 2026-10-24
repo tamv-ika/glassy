@@ -13,11 +13,26 @@ endif()
 option(GLASSY_PROTO_SERVER "Build the server-side sources" ${_glassy_server_default})
 option(GLASSY_PROTO_TESTS "Build the tests" ON)
 option(GLASSY_PROTO_SANITIZE "Build our targets and tests with ASan and UBSan (clang)" OFF)
+option(GLASSY_PROTO_FUZZ "Build the libFuzzer targets in fuzz/ with ASan and UBSan (clang)" OFF)
 
 if(GLASSY_PROTO_SANITIZE)
   # Global so gtest and the vendored libraries are instrumented consistently; nettle is a
   # system library and stays uninstrumented. No recovery: any report fails the test.
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer
+    -fno-sanitize-recover=all)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
+if(GLASSY_PROTO_FUZZ)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "GLASSY_PROTO_FUZZ needs clang for C and C++ (libFuzzer)")
+  endif()
+  if(NOT GLASSY_PROTO_SERVER)
+    message(FATAL_ERROR "GLASSY_PROTO_FUZZ needs GLASSY_PROTO_SERVER")
+  endif()
+  # Coverage instrumentation and sanitizers for every library; only the fuzz targets link the
+  # libFuzzer main. No recovery: a sanitizer report is a crash the fuzzer must keep.
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer
     -fno-sanitize-recover=all)
   add_link_options(-fsanitize=address,undefined)
 endif()
@@ -56,6 +71,21 @@ if(GLASSY_PROTO_SERVER)
   target_link_libraries(glassy_proto_server PUBLIC glassy_proto_core PkgConfig::NETTLE)
   target_compile_options(glassy_proto_server PRIVATE
     -Wall -Wextra -Werror -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
+
+  # Decode CLI for scripts/differential.sh; must print the same lines as crates/glassy-proto-cli.
+  add_executable(glassy_proto_cli tools/proto_cli.cc)
+  target_link_libraries(glassy_proto_cli PRIVATE glassy_proto_server)
+  target_compile_options(glassy_proto_cli PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(GLASSY_PROTO_FUZZ)
+  # Run with scripts/fuzz_smoke.sh.
+  foreach(_f fuzz_native fuzz_frames fuzz_server_ticket fuzz_connect_info fuzz_retry fuzz_wt)
+    add_executable(${_f} fuzz/${_f}.cc)
+    target_link_libraries(${_f} PRIVATE glassy_proto_server)
+    target_compile_options(${_f} PRIVATE -fsanitize=fuzzer -Wall -Wextra -Werror)
+    target_link_options(${_f} PRIVATE -fsanitize=fuzzer)
+  endforeach()
 endif()
 
 if(GLASSY_PROTO_TESTS)

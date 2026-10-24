@@ -1,0 +1,45 @@
+# cargo-fuzz targets for the gateway-side parsers (spec §7). Own workspace: it needs nightly
+# and libFuzzer, so the root workspace excludes it. Run with scripts/fuzz_smoke.sh.
+[package]
+name = "glassy-proto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+glassy-proto = { path = ".." }
+
+[[bin]]
+name = "connect"
+path = "fuzz_targets/connect.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "routing_ticket"
+path = "fuzz_targets/routing_ticket.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "retry_token"
+path = "fuzz_targets/retry_token.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connect_info"
+path = "fuzz_targets/connect_info.rs"
+test = false
+doc = false
+bench = false

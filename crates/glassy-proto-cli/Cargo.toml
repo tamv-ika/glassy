@@ -1,0 +1,13 @@
+[package]
+name = "glassy-proto-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Decode CLI for the Rust/C++ differential runner (scripts/differential.sh)"
+
+[dependencies]
+anyhow = "1.0.102"
+base64 = "0.23.1"
+glassy-proto = { path = "../glassy-proto" }
+hex = "0.4.3"
+serde_json = "1.0.154"
