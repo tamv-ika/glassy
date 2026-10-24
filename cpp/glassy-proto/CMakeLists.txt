@@ -18,14 +18,23 @@ add_library(glassy_monocypher STATIC third_party/monocypher/monocypher.c)
 target_include_directories(glassy_monocypher PUBLIC third_party/monocypher)
 target_compile_options(glassy_monocypher PRIVATE -ffunction-sections -fdata-sections)
 
-add_library(glassy_proto_core STATIC src/error.cc src/varint.cc src/aead.cc)
-target_include_directories(glassy_proto_core PUBLIC include)
+add_library(glassy_proto_core STATIC src/error.cc src/varint.cc src/aead.cc src/base64.cc)
+target_include_directories(glassy_proto_core PUBLIC include PRIVATE src)
 target_link_libraries(glassy_proto_core PUBLIC glassy_monocypher)
 target_compile_options(glassy_proto_core PRIVATE
   -Wall -Wextra -Werror -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
 
 if(GLASSY_PROTO_SERVER)
-  # Server sources arrive in a later task; the target is intentionally not defined yet.
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(NETTLE REQUIRED IMPORTED_TARGET nettle)
+
+  # nettle is only included from src/sha256_nettle.cc.
+  add_library(glassy_proto_server STATIC
+    src/server_ticket.cc src/ice.cc src/retry.cc src/trailer.cc src/wt.cc src/sha256_nettle.cc)
+  target_include_directories(glassy_proto_server PUBLIC include PRIVATE src)
+  target_link_libraries(glassy_proto_server PUBLIC glassy_proto_core PkgConfig::NETTLE)
+  target_compile_options(glassy_proto_server PRIVATE
+    -Wall -Wextra -Werror -fno-exceptions -fno-rtti -ffunction-sections -fdata-sections)
 endif()
 
 if(GLASSY_PROTO_TESTS)
@@ -59,6 +68,21 @@ if(GLASSY_PROTO_TESTS)
   target_link_libraries(kat_test PRIVATE glassy_proto_test_support GTest::gtest_main)
   target_compile_options(kat_test PRIVATE -Wall -Wextra -Werror)
 
+  add_executable(base64_test tests/base64_test.cc)
+  target_include_directories(base64_test PRIVATE src)
+  target_link_libraries(base64_test PRIVATE glassy_proto_core GTest::gtest_main)
+  target_compile_options(base64_test PRIVATE -Wall -Wextra -Werror)
+
   include(GoogleTest)
   gtest_discover_tests(kat_test)
+  gtest_discover_tests(base64_test)
+
+  if(GLASSY_PROTO_SERVER)
+    add_executable(server_test tests/server_ticket_test.cc tests/ice_test.cc tests/retry_test.cc
+      tests/wt_test.cc)
+    target_link_libraries(server_test PRIVATE glassy_proto_server glassy_proto_test_support
+      GTest::gtest_main)
+    target_compile_options(server_test PRIVATE -Wall -Wextra -Werror)
+    gtest_discover_tests(server_test)
+  endif()
 endif()
