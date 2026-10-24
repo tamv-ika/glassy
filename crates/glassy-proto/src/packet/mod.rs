@@ -1,10 +1,20 @@
 //! Native packet layer (spec §4). Packet number handling lives in [`pn`].
 
+pub mod accept;
 pub mod connect;
+pub mod data;
 pub mod pn;
 pub mod trailer;
 
+pub use accept::{
+    ACCEPT_LEN, Accept, REJECT_LEN, Reject, build_accept, build_reject, open_accept, open_reject,
+    peek_reply, reject_reason,
+};
 pub use connect::{ConnectView, VerifiedConnect, build_connect, parse_connect, verify_connect};
+pub use data::{
+    DATA_MIN, DISCONNECT_LEN, Header, MAX_FRAMES, open_data, open_disconnect, parse_header,
+    seal_data, seal_disconnect,
+};
 pub use trailer::{ClientAddrV4, append_trailer, split_trailer};
 
 /// First byte of every native packet (spec §4.1).

@@ -11,10 +11,13 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use glassy_proto::connect_info::{
     ConnectInfo, NativeInfo, WebRtcInfo, WtInfo, decode_connect_info, encode_connect_info,
 };
-use glassy_proto::crypto::{k_ticket, xchacha_seal};
+use glassy_proto::crypto::{k_ticket, packet_nonce, xchacha_seal};
 use glassy_proto::ice::ice_pwd;
+use glassy_proto::packet::pn::{ReplayWindow, decode_pn};
 use glassy_proto::packet::{
-    ClientAddrV4, append_trailer, build_connect, parse_connect, split_trailer, verify_connect,
+    Accept, ClientAddrV4, Reject, append_trailer, build_accept, build_connect, build_reject,
+    open_accept, open_data, open_disconnect, open_reject, parse_connect, parse_header, peek_reply,
+    reject_reason, seal_data, seal_disconnect, split_trailer, verify_connect,
 };
 use glassy_proto::retry::{mint_retry_token, retry_token_odcid, validate_retry_token};
 use glassy_proto::routing_ticket::{
@@ -1597,12 +1600,14 @@ const NP_SEQ: u64 = 1_700_000_000_000;
 const NP_CONN: [u8; 16] = [0x66; 16];
 const NP_SESSION: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const NP_KEY_C2S: [u8; 32] = [0x44; 32];
+const NP_KEY_S2C: [u8; 32] = [0x55; 32];
+const NP_SERVER_NONCE: [u8; 16] = [0x77; 16];
 
 struct NpCase {
     name: &'static str,
     packet: &'static str,
     op: &'static str,
-    /// Input fields, in file order after `name`/`packet`/`op`.
+    /// Input fields. The file lists keys alphabetically (serde_json sorts object keys).
     inputs: Vec<(&'static str, Value)>,
     expect: Result<Value, Error>,
 }
@@ -1836,12 +1841,447 @@ fn np_connect_cases() -> Vec<NpCase> {
         ),
         trailer_err("trailer_family_06", &family_06),
         trailer_err("trailer_reserved_nonzero", &reserved),
+        // Shorter than the 8-byte trailer itself.
+        trailer_err("trailer_input_7_bytes", &[0, 0, 0, 0, 0, 0, 4]),
+    ]
+}
+
+fn np_accept() -> Accept {
+    Accept {
+        session_id: NP_SESSION,
+        connect_seq: NP_SEQ,
+        server_nonce: NP_SERVER_NONCE,
+        resumed: false,
+        server_time_ms: 1_900_000_000_123,
+    }
+}
+
+fn np_reject(reason: u8) -> Reject {
+    Reject {
+        session_id: NP_SESSION,
+        connect_seq: NP_SEQ,
+        server_nonce: NP_SERVER_NONCE,
+        reason,
+        last_connect_seq: NP_SEQ + 1,
+    }
+}
+
+fn np_accept_json(a: &Accept) -> Value {
+    json!({
+        "session_id_hex": hex::encode(a.session_id),
+        "connect_seq": a.connect_seq,
+        "server_nonce_hex": hex::encode(a.server_nonce),
+        "resumed": a.resumed,
+        "server_time_ms": a.server_time_ms,
+    })
+}
+
+fn np_reject_json(r: &Reject) -> Value {
+    json!({
+        "session_id_hex": hex::encode(r.session_id),
+        "connect_seq": r.connect_seq,
+        "server_nonce_hex": hex::encode(r.server_nonce),
+        "reason": r.reason,
+        "last_connect_seq": r.last_connect_seq,
+    })
+}
+
+/// Inputs for opening an `ACCEPT`/`REJECT`: the packet plus the `conn_id` and key.
+fn np_reply_inputs(b: &[u8], conn_id: [u8; 16]) -> Vec<(&'static str, Value)> {
+    vec![
+        ("packet_hex", json!(hex::encode(b))),
+        ("conn_id_hex", json!(hex::encode(conn_id))),
+        ("key_s2c_hex", json!(hex::encode(NP_KEY_S2C))),
+    ]
+}
+
+fn np_reply_cases() -> Vec<NpCase> {
+    let fresh = np_accept();
+    let resumed = Accept {
+        resumed: true,
+        ..np_accept()
+    };
+    let stale = np_reject(reject_reason::STALE_CONNECT_SEQ);
+    let unknown = np_reject(9);
+    let accept_inputs = |a: &Accept| -> Vec<(&'static str, Value)> {
+        let mut v = vec![
+            ("session_id_hex", json!(hex::encode(a.session_id))),
+            ("connect_seq", json!(a.connect_seq)),
+            ("server_nonce_hex", json!(hex::encode(a.server_nonce))),
+            ("resumed", json!(a.resumed)),
+            ("server_time_ms", json!(a.server_time_ms)),
+        ];
+        v.push(("conn_id_hex", json!(hex::encode(NP_CONN))));
+        v.push(("key_s2c_hex", json!(hex::encode(NP_KEY_S2C))));
+        v
+    };
+    let reject_inputs = |r: &Reject| -> Vec<(&'static str, Value)> {
+        vec![
+            ("session_id_hex", json!(hex::encode(r.session_id))),
+            ("connect_seq", json!(r.connect_seq)),
+            ("server_nonce_hex", json!(hex::encode(r.server_nonce))),
+            ("reason", json!(r.reason)),
+            ("last_connect_seq", json!(r.last_connect_seq)),
+            ("conn_id_hex", json!(hex::encode(NP_CONN))),
+            ("key_s2c_hex", json!(hex::encode(NP_KEY_S2C))),
+        ]
+    };
+    let ok_bytes = |b: &[u8]| Ok(json!({ "bytes_hex": hex::encode(b) }));
+    let accept_bytes = |a: &Accept| build_accept(a, &NP_CONN, &NP_KEY_S2C);
+    let reject_bytes = |r: &Reject| build_reject(r, &NP_CONN, &NP_KEY_S2C);
+    let a_fresh = accept_bytes(&fresh);
+    let a_resumed = accept_bytes(&resumed);
+    let r_stale = reject_bytes(&stale);
+    let r_unknown = reject_bytes(&unknown);
+    // A correctly sealed ACCEPT whose flags byte sets a reserved bit (0x02).
+    let reserved_flag = {
+        let mut body = [0u8; 10];
+        body[0] = 0x02;
+        let mut b = a_fresh[..33].to_vec();
+        let mut aad = b.clone();
+        aad.extend_from_slice(&NP_CONN);
+        let sealed = xchacha_seal(&NP_KEY_S2C, &packet_nonce(&NP_SERVER_NONCE, 0), &aad, &body);
+        b.extend_from_slice(&sealed);
+        b
+    };
+    vec![
+        NpCase {
+            name: "accept_fresh",
+            packet: "accept",
+            op: "build",
+            inputs: accept_inputs(&fresh),
+            expect: ok_bytes(&a_fresh),
+        },
+        NpCase {
+            name: "accept_fresh_open",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(&a_fresh, NP_CONN),
+            expect: Ok(np_accept_json(&fresh)),
+        },
+        NpCase {
+            name: "accept_resumed",
+            packet: "accept",
+            op: "build",
+            inputs: accept_inputs(&resumed),
+            expect: ok_bytes(&a_resumed),
+        },
+        NpCase {
+            name: "accept_resumed_open",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(&a_resumed, NP_CONN),
+            expect: Ok(np_accept_json(&resumed)),
+        },
+        NpCase {
+            name: "accept_wrong_conn_id",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(&a_fresh, [0x67; 16]),
+            expect: Err(Error::AuthFailed),
+        },
+        NpCase {
+            name: "accept_reserved_flag",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(&reserved_flag, NP_CONN),
+            expect: Err(Error::ReservedNonzero),
+        },
+        NpCase {
+            name: "accept_len_58",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(&a_fresh[..58], NP_CONN),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "accept_type_84",
+            packet: "accept",
+            op: "open",
+            inputs: np_reply_inputs(
+                &{
+                    let mut b = a_fresh;
+                    b[0] = 0x84;
+                    b
+                },
+                NP_CONN,
+            ),
+            expect: Err(Error::BadType),
+        },
+        NpCase {
+            name: "accept_peek",
+            packet: "accept",
+            op: "peek",
+            inputs: np_packet_input(&a_fresh),
+            expect: Ok(json!({
+                "type": 0x81,
+                "session_id_hex": hex::encode(NP_SESSION),
+                "connect_seq": NP_SEQ,
+            })),
+        },
+        NpCase {
+            name: "reject_stale",
+            packet: "reject",
+            op: "build",
+            inputs: reject_inputs(&stale),
+            expect: ok_bytes(&r_stale),
+        },
+        NpCase {
+            name: "reject_stale_open",
+            packet: "reject",
+            op: "open",
+            inputs: np_reply_inputs(&r_stale, NP_CONN),
+            expect: Ok(np_reject_json(&stale)),
+        },
+        NpCase {
+            name: "reject_unknown_reason_9",
+            packet: "reject",
+            op: "build",
+            inputs: reject_inputs(&unknown),
+            expect: ok_bytes(&r_unknown),
+        },
+        NpCase {
+            name: "reject_unknown_reason_9_open",
+            packet: "reject",
+            op: "open",
+            inputs: np_reply_inputs(&r_unknown, NP_CONN),
+            expect: Ok(np_reject_json(&unknown)),
+        },
+        NpCase {
+            name: "reject_peek",
+            packet: "reject",
+            op: "peek",
+            inputs: np_packet_input(&r_stale),
+            expect: Ok(json!({
+                "type": 0x84,
+                "session_id_hex": hex::encode(NP_SESSION),
+                "connect_seq": NP_SEQ,
+            })),
+        },
+    ]
+}
+
+fn np_data_inputs(pn: u64, frames: &[u8]) -> Vec<(&'static str, Value)> {
+    vec![
+        ("key_hex", json!(hex::encode(NP_KEY_S2C))),
+        ("server_nonce_hex", json!(hex::encode(NP_SERVER_NONCE))),
+        ("session_id_hex", json!(hex::encode(NP_SESSION))),
+        ("pn", json!(pn)),
+        ("frames_hex", json!(hex::encode(frames))),
+    ]
+}
+
+fn np_open_inputs(b: &[u8], pn: u64) -> Vec<(&'static str, Value)> {
+    vec![
+        ("key_hex", json!(hex::encode(NP_KEY_S2C))),
+        ("server_nonce_hex", json!(hex::encode(NP_SERVER_NONCE))),
+        ("packet_hex", json!(hex::encode(b))),
+        ("pn", json!(pn)),
+    ]
+}
+
+fn np_header_expect(b: &[u8]) -> Value {
+    np_header_expect_checked(b).unwrap()
+}
+
+fn np_header_expect_checked(b: &[u8]) -> Result<Value, Error> {
+    let h = parse_header(b)?;
+    Ok(json!({
+        "type": h.ty,
+        "session_id_hex": hex::encode(h.session_id),
+        "pn_low": h.pn_low,
+    }))
+}
+
+fn np_data_cases() -> Vec<NpCase> {
+    let frames = (0u8..=99).collect::<Vec<_>>();
+    let wrap_pn = 0x1_0000_0005u64;
+    let keepalive = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 1, &[]).unwrap();
+    let with_frames = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 42, &frames).unwrap();
+    let wrap = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, wrap_pn, &frames).unwrap();
+    let disc = seal_disconnect(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 43, 2);
+    let bytes = |b: &[u8]| Ok(json!({ "bytes_hex": hex::encode(b) }));
+    let frames_out = |f: &[u8]| Ok(json!({ "frames_hex": hex::encode(f) }));
+    let mut type_85 = keepalive.clone();
+    type_85[0] = 0x85;
+    vec![
+        NpCase {
+            name: "data_keepalive",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(1, &[]),
+            expect: bytes(&keepalive),
+        },
+        NpCase {
+            name: "data_keepalive_open",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&keepalive, 1),
+            expect: frames_out(&[]),
+        },
+        NpCase {
+            name: "data_with_frames",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(42, &frames),
+            expect: bytes(&with_frames),
+        },
+        NpCase {
+            name: "data_with_frames_open",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&with_frames, 42),
+            expect: frames_out(&frames),
+        },
+        NpCase {
+            name: "data_pn_low_wrap",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(wrap_pn, &frames),
+            expect: bytes(&wrap),
+        },
+        NpCase {
+            name: "data_pn_low_wrap_open",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&wrap, wrap_pn),
+            expect: frames_out(&frames),
+        },
+        NpCase {
+            name: "data_pn_low_wrap_header",
+            packet: "data",
+            op: "parse_header",
+            inputs: np_packet_input(&wrap),
+            expect: Ok(np_header_expect(&wrap)),
+        },
+        NpCase {
+            name: "data_wrong_pn",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&with_frames, 43),
+            expect: Err(Error::AuthFailed),
+        },
+        NpCase {
+            name: "data_pn_zero",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(0, &[]),
+            expect: Err(Error::Replayed),
+        },
+        NpCase {
+            name: "data_frames_1172",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(1, &vec![0; 1172]),
+            expect: Err(Error::TooLarge),
+        },
+        NpCase {
+            name: "data_len_28",
+            packet: "data",
+            op: "parse_header",
+            inputs: np_packet_input(&keepalive[..28]),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "data_type_85",
+            packet: "data",
+            op: "parse_header",
+            inputs: np_packet_input(&type_85),
+            expect: Err(Error::BadType),
+        },
+        NpCase {
+            name: "disconnect_normal",
+            packet: "disconnect",
+            op: "seal",
+            inputs: {
+                let mut v = np_data_inputs(43, &[]);
+                v.pop();
+                v.push(("reason", json!(2)));
+                v
+            },
+            expect: bytes(&disc),
+        },
+        NpCase {
+            name: "disconnect_normal_open",
+            packet: "disconnect",
+            op: "open",
+            inputs: np_open_inputs(&disc, 43),
+            expect: Ok(json!({ "reason": 2 })),
+        },
+        NpCase {
+            name: "disconnect_len_29",
+            packet: "disconnect",
+            op: "open",
+            inputs: np_open_inputs(&disc[..29], 43),
+            expect: Err(Error::BadLength),
+        },
+    ]
+}
+
+/// `op: decode_pn` expects `{pn}`; `op: window` replays `commits`, then checks `check`.
+fn np_pn_cases() -> Vec<NpCase> {
+    let decode = |name, largest: u64, low: u32, pn: u64| NpCase {
+        name,
+        packet: "pn",
+        op: "decode_pn",
+        inputs: vec![("largest", json!(largest)), ("low", json!(low))],
+        expect: Ok(json!({ "pn": pn })),
+    };
+    let window = |name, commits: &[u64], check: u64, e: Option<Error>| NpCase {
+        name,
+        packet: "replay",
+        op: "window",
+        inputs: vec![("commits", json!(commits)), ("check", json!(check))],
+        expect: match e {
+            None => Ok(json!({ "status": "ok" })),
+            Some(e) => Err(e),
+        },
+    };
+    vec![
+        decode("pn_first_packet", 0, 1, 1),
+        decode("pn_next", 1000, 1001, 1001),
+        decode("pn_reordered_back", 1000, 990, 990),
+        decode("pn_boundary_forward", 0xFFFF_FFF0, 2, 0x1_0000_0002),
+        decode(
+            "pn_boundary_stays_low",
+            0x1_0000_0005,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF,
+        ),
+        decode("pn_boundary_stays_high", 0x1_0000_0005, 3, 0x1_0000_0003),
+        window("window_fresh_ok", &[], 1, None),
+        window("window_pn_zero", &[], 0, Some(Error::Replayed)),
+        window("window_duplicate", &[5, 6, 7], 6, Some(Error::Replayed)),
+        window("window_gap_ok", &[5, 7], 6, None),
+        window("window_edge_ok", &[1000], 745, None),
+        window("window_edge_too_old", &[1000], 744, Some(Error::TooOld)),
+        window(
+            "window_jump_clears_old",
+            &[1, 2, 3, 600],
+            3,
+            Some(Error::TooOld),
+        ),
+        window(
+            "window_jump_reuses_slot",
+            &[3, 259],
+            259,
+            Some(Error::Replayed),
+        ),
+        window(
+            "window_old_still_in_window",
+            &[3, 258],
+            3,
+            Some(Error::Replayed),
+        ),
     ]
 }
 
 fn np_cases() -> Vec<NpCase> {
     let mut v = Vec::new();
     v.extend(np_connect_cases());
+    v.extend(np_reply_cases());
+    v.extend(np_data_cases());
+    v.extend(np_pn_cases());
     v
 }
 
@@ -1916,6 +2356,105 @@ fn np_run(c: &Value) -> Result<Value, Error> {
             let b = np_hex(c, "packet_hex");
             let (body, a) = split_trailer(&b)?;
             Ok(np_trailer_expect(body, a))
+        }
+        ("accept", "build") => {
+            let a = Accept {
+                session_id: np_arr(c, "session_id_hex"),
+                connect_seq: c["connect_seq"].as_u64().unwrap(),
+                server_nonce: np_arr(c, "server_nonce_hex"),
+                resumed: c["resumed"].as_bool().unwrap(),
+                server_time_ms: c["server_time_ms"].as_u64().unwrap(),
+            };
+            let b = build_accept(&a, &np_arr(c, "conn_id_hex"), &np_arr(c, "key_s2c_hex"));
+            Ok(json!({ "bytes_hex": hex::encode(b) }))
+        }
+        ("accept", "open") => {
+            let a = open_accept(
+                &np_hex(c, "packet_hex"),
+                &np_arr(c, "conn_id_hex"),
+                &np_arr(c, "key_s2c_hex"),
+            )?;
+            Ok(np_accept_json(&a))
+        }
+        ("accept" | "reject", "peek") => {
+            let (ty, session_id, seq) = peek_reply(&np_hex(c, "packet_hex"))?;
+            Ok(json!({
+                "type": ty,
+                "session_id_hex": hex::encode(session_id),
+                "connect_seq": seq,
+            }))
+        }
+        ("reject", "build") => {
+            let r = Reject {
+                session_id: np_arr(c, "session_id_hex"),
+                connect_seq: c["connect_seq"].as_u64().unwrap(),
+                server_nonce: np_arr(c, "server_nonce_hex"),
+                reason: c["reason"].as_u64().unwrap() as u8,
+                last_connect_seq: c["last_connect_seq"].as_u64().unwrap(),
+            };
+            let b = build_reject(&r, &np_arr(c, "conn_id_hex"), &np_arr(c, "key_s2c_hex"));
+            Ok(json!({ "bytes_hex": hex::encode(b) }))
+        }
+        ("reject", "open") => {
+            let r = open_reject(
+                &np_hex(c, "packet_hex"),
+                &np_arr(c, "conn_id_hex"),
+                &np_arr(c, "key_s2c_hex"),
+            )?;
+            Ok(np_reject_json(&r))
+        }
+        ("data", "seal") => {
+            let b = seal_data(
+                &np_arr(c, "key_hex"),
+                &np_arr(c, "server_nonce_hex"),
+                &np_arr(c, "session_id_hex"),
+                c["pn"].as_u64().unwrap(),
+                &np_hex(c, "frames_hex"),
+            )?;
+            Ok(json!({ "bytes_hex": hex::encode(b) }))
+        }
+        ("data", "open") => {
+            let f = open_data(
+                &np_arr(c, "key_hex"),
+                &np_arr(c, "server_nonce_hex"),
+                &np_hex(c, "packet_hex"),
+                c["pn"].as_u64().unwrap(),
+            )?;
+            Ok(json!({ "frames_hex": hex::encode(f) }))
+        }
+        ("data", "parse_header") => Ok(np_header_expect_checked(&np_hex(c, "packet_hex"))?),
+        ("disconnect", "seal") => {
+            let b = seal_disconnect(
+                &np_arr(c, "key_hex"),
+                &np_arr(c, "server_nonce_hex"),
+                &np_arr(c, "session_id_hex"),
+                c["pn"].as_u64().unwrap(),
+                c["reason"].as_u64().unwrap() as u8,
+            );
+            Ok(json!({ "bytes_hex": hex::encode(b) }))
+        }
+        ("disconnect", "open") => {
+            let r = open_disconnect(
+                &np_arr(c, "key_hex"),
+                &np_arr(c, "server_nonce_hex"),
+                &np_hex(c, "packet_hex"),
+                c["pn"].as_u64().unwrap(),
+            )?;
+            Ok(json!({ "reason": r }))
+        }
+        ("pn", "decode_pn") => Ok(json!({
+            "pn": decode_pn(
+                c["largest"].as_u64().unwrap(),
+                c["low"].as_u64().unwrap() as u32,
+            )
+        })),
+        ("replay", "window") => {
+            let mut w = ReplayWindow::new();
+            for pn in c["commits"].as_array().unwrap() {
+                w.commit(pn.as_u64().unwrap());
+            }
+            w.check(c["check"].as_u64().unwrap())?;
+            Ok(json!({ "status": "ok" }))
         }
         (p, op) => panic!("{name}: unsupported case {p}/{op}"),
     }

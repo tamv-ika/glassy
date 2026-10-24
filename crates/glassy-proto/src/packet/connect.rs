@@ -5,7 +5,9 @@
 
 use super::{CONNECT_MIN, MAX_PACKET, packet_type};
 use crate::crypto::{xchacha_open, xchacha_seal};
-use crate::server_ticket::{SERVER_TICKET_MAX, SERVER_TICKET_NATIVE_MIN};
+use crate::server_ticket::{
+    SERVER_TICKET_MAX, SERVER_TICKET_NATIVE_MIN, ServerKeyRing, ServerTicket, open_server,
+};
 use crate::{Error, transport};
 
 const VERSION: u8 = 1;
@@ -29,8 +31,8 @@ fn arr<const N: usize>(s: &[u8]) -> Result<[u8; N], Error> {
 fn arr_ref<const N: usize>(s: &[u8]) -> Result<&[u8; N], Error> {
     s.try_into().map_err(|_| Error::BadLength)
 }
-use crate::server_ticket::{ServerKeyRing, ServerTicket, open_server};
 
+#[derive(Debug)]
 pub struct ConnectView<'a> {
     pub session_id: [u8; 8],
     pub conn_id: [u8; 16],
@@ -345,7 +347,10 @@ mod tests {
         assert_eq!(verify(&b).err(), Some(Error::AuthFailed));
         // A signed field changed after proofing also fails.
         let mut b = build(&native_ticket(), 0);
-        b[40] ^= 1; // connect_seq
+        b[40] ^= 1; // routing_ticket byte
+        assert_eq!(verify(&b).err(), Some(Error::AuthFailed));
+        let mut b = build(&native_ticket(), 0);
+        b[30] ^= 1; // connect_seq
         assert_eq!(verify(&b).err(), Some(Error::AuthFailed));
     }
 
