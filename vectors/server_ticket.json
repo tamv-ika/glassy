@@ -137,6 +137,14 @@
       "via": 1
     },
     {
+      "error": "bad_length",
+      "name": "user_id_not_utf8_and_trailing_byte",
+      "now": 1900000000,
+      "self_server_id_hex": "abababababababababababababababab",
+      "ticket_hex": "0101999999999999999999999999999999999999999999999999bcd08d13facabfb127efe28db866aa7aa293cf3fbcb352a803ad82f28ab1e5d0093447d928c85aa0d4fc074dab6794da67d4e1",
+      "via": 1
+    },
+    {
       "error": "bad_transport",
       "name": "transport_three",
       "now": 1900000000,

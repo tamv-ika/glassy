@@ -464,6 +464,15 @@ fn st_cases() -> Vec<StCase> {
         &st_seal_raw(&b),
         Err(Error::BadUserId),
     ));
+    // The exact-length check (bad_length) runs before the UTF-8 check on user_id.
+    let mut rest = meta0.to_vec();
+    rest.push(0);
+    let b = st_body(2, &[0xff, 0xfe], 2, &rest);
+    v.push(case(
+        "user_id_not_utf8_and_trailing_byte",
+        &st_seal_raw(&b),
+        Err(Error::BadLength),
+    ));
     let b = st_body(1, b"a", 3, &meta0);
     v.push(case(
         "transport_three",
@@ -1238,6 +1247,21 @@ fn ci_cases() -> Vec<CiCase> {
             &base,
             &format!("\"key_c2s\":\"{}\",", b64(&nat.key_c2s)),
             "",
+        ),
+        Error::BadJson,
+    ));
+    // Pins spec §3.5 rules 8 and 9: presence checks run before any value check, so the missing
+    // field wins over the malformed session_id.
+    v.push(bad(
+        "bad_session_id_and_missing_block_field",
+        mutate(
+            &mutate(
+                &base,
+                &format!("\"key_c2s\":\"{}\",", b64(&nat.key_c2s)),
+                "",
+            ),
+            sid,
+            "\"session_id\":\"XYZ\"",
         ),
         Error::BadJson,
     ));

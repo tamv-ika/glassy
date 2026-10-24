@@ -100,7 +100,7 @@ void expect_matches(const ConnectInfo& ci, const nlohmann::json& e) {
 
 TEST(ConnectInfo, Vectors) {
   const auto file = load_vectors("connect_info.json");
-  ASSERT_GE(file["cases"].size(), 72u);
+  ASSERT_GE(file["cases"].size(), 73u);
   // Heap-allocated: ConnectInfo plus scratch is ~10KB, kept off the gtest stack.
   auto ci = std::make_unique<ConnectInfo>();
   std::vector<uint8_t> scratch(kConnectInfoScratchMin);
