@@ -5,6 +5,7 @@ pub mod consts;
 pub mod crypto;
 pub mod error;
 pub mod ice;
+pub mod packet;
 pub mod retry;
 pub mod routing_ticket;
 pub mod server_ticket;
