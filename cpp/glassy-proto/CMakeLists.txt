@@ -19,7 +19,8 @@ target_include_directories(glassy_monocypher PUBLIC third_party/monocypher)
 target_compile_options(glassy_monocypher PRIVATE -ffunction-sections -fdata-sections)
 
 add_library(glassy_proto_core STATIC src/error.cc src/varint.cc src/aead.cc src/base64.cc
-  src/utf8.cc src/json_reader.cc src/connect_info.cc)
+  src/utf8.cc src/json_reader.cc src/connect_info.cc src/pn.cc src/packet_connect.cc
+  src/packet_reply.cc src/packet_data.cc)
 target_include_directories(glassy_proto_core PUBLIC include PRIVATE src)
 target_link_libraries(glassy_proto_core PUBLIC glassy_monocypher)
 target_compile_options(glassy_proto_core PRIVATE
@@ -31,7 +32,7 @@ if(GLASSY_PROTO_SERVER)
 
   # nettle is only included from src/sha256_nettle.cc.
   add_library(glassy_proto_server STATIC
-    src/server_ticket.cc src/ice.cc src/retry.cc src/trailer.cc src/wt.cc src/sha256_nettle.cc)
+    src/packet_server.cc src/server_ticket.cc src/ice.cc src/retry.cc src/trailer.cc src/wt.cc src/sha256_nettle.cc)
   target_include_directories(glassy_proto_server PUBLIC include PRIVATE src)
   target_link_libraries(glassy_proto_server PUBLIC glassy_proto_core PkgConfig::NETTLE)
   target_compile_options(glassy_proto_server PRIVATE
@@ -85,6 +86,12 @@ if(GLASSY_PROTO_TESTS)
   gtest_discover_tests(base64_test)
   gtest_discover_tests(connect_info_test)
 
+  # Core-only: must build and pass without the server target.
+  add_executable(packet_core_test tests/packet_core_test.cc)
+  target_link_libraries(packet_core_test PRIVATE glassy_proto_test_support GTest::gtest_main)
+  target_compile_options(packet_core_test PRIVATE -Wall -Wextra -Werror)
+  gtest_discover_tests(packet_core_test)
+
   if(GLASSY_PROTO_SERVER)
     add_executable(server_test tests/server_ticket_test.cc tests/ice_test.cc tests/retry_test.cc
       tests/wt_test.cc)
@@ -92,5 +99,11 @@ if(GLASSY_PROTO_TESTS)
       GTest::gtest_main)
     target_compile_options(server_test PRIVATE -Wall -Wextra -Werror)
     gtest_discover_tests(server_test)
+
+    add_executable(packet_server_test tests/packet_server_test.cc)
+    target_link_libraries(packet_server_test PRIVATE glassy_proto_server
+      glassy_proto_test_support GTest::gtest_main)
+    target_compile_options(packet_server_test PRIVATE -Wall -Wextra -Werror)
+    gtest_discover_tests(packet_server_test)
   endif()
 endif()
