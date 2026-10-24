@@ -2058,6 +2058,59 @@ fn np_reply_cases() -> Vec<NpCase> {
                 "connect_seq": NP_SEQ,
             })),
         },
+        NpCase {
+            name: "reply_peek_type_82_len_59",
+            packet: "accept",
+            op: "peek",
+            inputs: np_packet_input(&{
+                let mut b = a_fresh;
+                b[0] = 0x82;
+                b
+            }),
+            expect: Err(Error::BadType),
+        },
+        NpCase {
+            name: "reply_peek_type_90_len_20",
+            packet: "accept",
+            op: "peek",
+            inputs: np_packet_input(&[0x90; 20]),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "reply_peek_accept_len_58",
+            packet: "accept",
+            op: "peek",
+            inputs: np_packet_input(&a_fresh[..58]),
+            expect: Err(Error::BadType),
+        },
+        NpCase {
+            name: "reply_peek_empty",
+            packet: "accept",
+            op: "peek",
+            inputs: np_packet_input(&[]),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "reject_len_57",
+            packet: "reject",
+            op: "open",
+            inputs: np_reply_inputs(&r_stale[..57], NP_CONN),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "reject_type_81",
+            packet: "reject",
+            op: "open",
+            inputs: np_reply_inputs(
+                &{
+                    let mut b = r_stale;
+                    b[0] = 0x81;
+                    b
+                },
+                NP_CONN,
+            ),
+            expect: Err(Error::BadType),
+        },
     ]
 }
 
@@ -2099,9 +2152,12 @@ fn np_data_cases() -> Vec<NpCase> {
     let keepalive = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 1, &[]).unwrap();
     let with_frames = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 42, &frames).unwrap();
     let wrap = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, wrap_pn, &frames).unwrap();
-    let disc = seal_disconnect(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 43, 2);
+    let disc = seal_disconnect(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 43, 2).unwrap();
     let bytes = |b: &[u8]| Ok(json!({ "bytes_hex": hex::encode(b) }));
     let frames_out = |f: &[u8]| Ok(json!({ "frames_hex": hex::encode(f) }));
+    // A 30-byte DATA packet (one frame byte) looks like a DISCONNECT by length only.
+    let disc_len_data = seal_data(&NP_KEY_S2C, &NP_SERVER_NONCE, &NP_SESSION, 43, &[2]).unwrap();
+    assert_eq!(disc_len_data.len(), 30);
     let mut type_85 = keepalive.clone();
     type_85[0] = 0x85;
     vec![
@@ -2215,6 +2271,46 @@ fn np_data_cases() -> Vec<NpCase> {
             inputs: np_open_inputs(&disc[..29], 43),
             expect: Err(Error::BadLength),
         },
+        NpCase {
+            name: "disconnect_pn_zero",
+            packet: "disconnect",
+            op: "seal",
+            inputs: {
+                let mut v = np_data_inputs(0, &[]);
+                v.pop();
+                v.push(("reason", json!(2)));
+                v
+            },
+            expect: Err(Error::Replayed),
+        },
+        NpCase {
+            name: "data_pn_zero_frames_1172",
+            packet: "data",
+            op: "seal",
+            inputs: np_data_inputs(0, &vec![0; 1172]),
+            expect: Err(Error::TooLarge),
+        },
+        NpCase {
+            name: "data_open_len_1201",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&vec![0x82; 1201], 1),
+            expect: Err(Error::BadLength),
+        },
+        NpCase {
+            name: "data_open_disconnect_type",
+            packet: "data",
+            op: "open",
+            inputs: np_open_inputs(&disc, 43),
+            expect: Err(Error::BadType),
+        },
+        NpCase {
+            name: "disconnect_open_data_type",
+            packet: "disconnect",
+            op: "open",
+            inputs: np_open_inputs(&disc_len_data, 43),
+            expect: Err(Error::BadType),
+        },
     ]
 }
 
@@ -2251,6 +2347,7 @@ fn np_pn_cases() -> Vec<NpCase> {
         decode("pn_boundary_stays_high", 0x1_0000_0005, 3, 0x1_0000_0003),
         window("window_fresh_ok", &[], 1, None),
         window("window_pn_zero", &[], 0, Some(Error::Replayed)),
+        window("window_pn_zero_after_500", &[500], 0, Some(Error::Replayed)),
         window("window_duplicate", &[5, 6, 7], 6, Some(Error::Replayed)),
         window("window_gap_ok", &[5, 7], 6, None),
         window("window_edge_ok", &[1000], 745, None),
@@ -2430,7 +2527,7 @@ fn np_run(c: &Value) -> Result<Value, Error> {
                 &np_arr(c, "session_id_hex"),
                 c["pn"].as_u64().unwrap(),
                 c["reason"].as_u64().unwrap() as u8,
-            );
+            )?;
             Ok(json!({ "bytes_hex": hex::encode(b) }))
         }
         ("disconnect", "open") => {

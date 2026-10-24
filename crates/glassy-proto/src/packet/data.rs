@@ -110,7 +110,11 @@ pub fn seal_disconnect(
     session_id: &[u8; 8],
     pn: u64,
     reason: u8,
-) -> [u8; DISCONNECT_LEN] {
+) -> Result<[u8; DISCONNECT_LEN], Error> {
+    // pn 0 with key_s2c would reuse the ACCEPT/REJECT nonce (server_nonce | 0⁸), spec §0.3.
+    if pn == 0 {
+        return Err(Error::Replayed);
+    }
     let v = seal(
         packet_type::DISCONNECT,
         key,
@@ -121,7 +125,7 @@ pub fn seal_disconnect(
     );
     let mut out = [0u8; DISCONNECT_LEN];
     out.copy_from_slice(&v);
-    out
+    Ok(out)
 }
 
 /// Returns the reason byte as received; unknown values are not an error.
@@ -209,7 +213,7 @@ mod tests {
 
     #[test]
     fn data_open_rejects_disconnect_type() {
-        let d = seal_disconnect(&KEY, &NONCE, &SESSION, 1, 0);
+        let d = seal_disconnect(&KEY, &NONCE, &SESSION, 1, 0).unwrap();
         assert_eq!(open_data(&KEY, &NONCE, &d, 1), Err(Error::BadType));
     }
 
@@ -234,8 +238,16 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_pn_zero_rejected() {
+        assert_eq!(
+            seal_disconnect(&KEY, &NONCE, &SESSION, 0, 0),
+            Err(Error::Replayed)
+        );
+    }
+
+    #[test]
     fn disconnect_is_30_bytes() {
-        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 2);
+        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 2).unwrap();
         assert_eq!(b.len(), 30);
         assert_eq!(b[0], 0x83);
         assert_eq!(open_disconnect(&KEY, &NONCE, &b, 4), Ok(2));
@@ -243,13 +255,13 @@ mod tests {
 
     #[test]
     fn disconnect_unknown_reason_preserved() {
-        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 0xfe);
+        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 0xfe).unwrap();
         assert_eq!(open_disconnect(&KEY, &NONCE, &b, 4), Ok(0xfe));
     }
 
     #[test]
     fn disconnect_length_and_type() {
-        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 0);
+        let b = seal_disconnect(&KEY, &NONCE, &SESSION, 4, 0).unwrap();
         assert_eq!(
             open_disconnect(&KEY, &NONCE, &b[..29], 4),
             Err(Error::BadLength)
@@ -273,7 +285,7 @@ mod tests {
             let h = parse_header(&b).unwrap();
             prop_assert_eq!((h.session_id, h.pn_low), (session, pn as u32));
             prop_assert_eq!(open_data(&key, &nonce, &b, pn), Ok(frames));
-            let d = seal_disconnect(&key, &nonce, &session, pn, reason);
+            let d = seal_disconnect(&key, &nonce, &session, pn, reason).unwrap();
             prop_assert_eq!(open_disconnect(&key, &nonce, &d, pn), Ok(reason));
         }
     }

@@ -120,21 +120,18 @@ pub fn build_accept(a: &Accept, conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> [u8; 
 
 /// Reads the unauthenticated head of an `ACCEPT`/`REJECT` so a client can find the pending
 /// `conn_id` it needs for [`open_accept`]/[`open_reject`]. Returns `(type, session_id, connect_seq)`.
+///
+/// The length decides first: anything but 59 or 58 bytes is `BadLength`. The type must then
+/// match the length (59 with `0x81`, 58 with `0x84`), otherwise `BadType`.
 pub fn peek_reply(b: &[u8]) -> Result<(u8, [u8; 8], u64), Error> {
-    let ty = *b.first().ok_or(Error::BadLength)?;
-    let want = match ty {
-        packet_type::ACCEPT => ACCEPT_LEN,
-        packet_type::REJECT => REJECT_LEN,
-        _ => {
-            return Err(if b.len() < HEAD_LEN {
-                Error::BadLength
-            } else {
-                Error::BadType
-            });
-        }
+    let want = match b.len() {
+        ACCEPT_LEN => packet_type::ACCEPT,
+        REJECT_LEN => packet_type::REJECT,
+        _ => return Err(Error::BadLength),
     };
-    if b.len() != want {
-        return Err(Error::BadLength);
+    let ty = b[0];
+    if ty != want {
+        return Err(Error::BadType);
     }
     let session_id = b[1..9].try_into().map_err(|_| Error::BadLength)?;
     let seq = u64::from_be_bytes(b[9..17].try_into().map_err(|_| Error::BadLength)?);
@@ -144,7 +141,10 @@ pub fn peek_reply(b: &[u8]) -> Result<(u8, [u8; 8], u64), Error> {
 pub fn open_accept(b: &[u8], conn_id: &[u8; 16], key_s2c: &[u8; 32]) -> Result<Accept, Error> {
     let o = open_reply(b, packet_type::ACCEPT, ACCEPT_LEN, conn_id, key_s2c)?;
     let p = o.body;
-    if p.len() != 10 || p[0] & !1 != 0 || p[1] != 0 {
+    if p.len() != 10 {
+        return Err(Error::BadLength);
+    }
+    if p[0] & !1 != 0 || p[1] != 0 {
         return Err(Error::ReservedNonzero);
     }
     Ok(Accept {
@@ -327,7 +327,7 @@ mod tests {
         let r = build_reject(&reject(), &CONN, &KEY);
         assert_eq!(peek_reply(&r), Ok((0x84, reject().session_id, 5)));
         assert_eq!(peek_reply(&r[..57]), Err(Error::BadLength));
-        assert_eq!(peek_reply(&b[..58]), Err(Error::BadLength));
+        assert_eq!(peek_reply(&b[..58]), Err(Error::BadType));
         assert_eq!(peek_reply(&[]), Err(Error::BadLength));
         let mut bad = b;
         bad[0] = 0x82;
