@@ -5,6 +5,8 @@ use glassy_proto::{decode_connect_info, encode_connect_info};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // The Rust API takes `&str`; raw non-UTF-8 input is covered by the C++ fuzz_connect_info
+    // target and by the differential (scripts/differential.sh).
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };

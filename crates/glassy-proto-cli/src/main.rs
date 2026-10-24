@@ -120,6 +120,9 @@ fn retry_token(b: &[u8]) -> Decoded {
 /// The Rust decoders take `&str`, the C++ ones raw bytes. Each byte of an invalid UTF-8
 /// sequence becomes 0x7F, which (like every byte >= 0x80) is outside the base64url alphabet and
 /// the path prefix, and the byte length that both decoders check first is unchanged.
+// Safe because every decoder rejects a non-ASCII byte and 0x7F with the same code at the same
+// check, and the length is preserved; a future decoder that told them apart would show up as a
+// false diff, never hide a real one.
 fn text(b: &[u8]) -> String {
     let mut s = String::with_capacity(b.len());
     for chunk in b.utf8_chunks() {

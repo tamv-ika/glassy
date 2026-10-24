@@ -62,17 +62,30 @@ trap 'rm -rf "$tmp"' EXIT
 
 total=0
 mismatches=0
+empty_kinds=()
 for kind in "${kinds[@]}"; do
   : >"$tmp/files"
   read -ra subs <<<"$(subdirs_for "$kind")"
   for root in "$@"; do
+    # A root may lack some kinds (a fuzz corpus only has the kinds its targets wrote).
+    : >"$tmp/part"
     for sub in "${subs[@]}"; do
       if [[ -d $root/$sub ]]; then
-        find "$root/$sub" -maxdepth 1 -type f | LC_ALL=C sort >>"$tmp/files"
+        find "$root/$sub" -maxdepth 1 -type f | LC_ALL=C sort >>"$tmp/part"
       fi
     done
+    if [[ -s $tmp/part ]]; then
+      cat "$tmp/part" >>"$tmp/files"
+    else
+      echo "$root/$kind: 0 inputs (skipped)"
+    fi
   done
-  [[ -s $tmp/files ]] || continue
+  # Every kind must be exercised by some root, so a broken corpus path cannot pass silently.
+  if [[ ! -s $tmp/files ]]; then
+    echo "error: no inputs for $kind" >&2
+    empty_kinds+=("$kind")
+    continue
+  fi
 
   : >"$tmp/in"
   while IFS= read -r f; do
@@ -103,7 +116,7 @@ for kind in "${kinds[@]}"; do
 done
 
 echo "differential: $total inputs, $mismatches mismatches"
-if [[ $mismatches -ne 0 ]]; then
+if [[ $mismatches -ne 0 || $total -eq 0 || ${#empty_kinds[@]} -ne 0 ]]; then
   echo FAIL
   exit 1
 fi
