@@ -59,6 +59,18 @@ if(GLASSY_PROTO_SERVER)
 endif()
 
 if(GLASSY_PROTO_TESTS)
+  if(EMSCRIPTEN)
+    # Tests only (the library above is already declared with -fno-exceptions): nlohmann_json
+    # throws and gtest catches, so test code needs exceptions under Emscripten.
+    add_compile_options(-fexceptions)
+    add_link_options(-fexceptions)
+    # NODERAWFS lets Node read the absolute GLASSY_VECTORS_DIR / GLASSY_FIXTURES_DIR paths.
+    link_libraries(-sNODERAWFS=1 -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1)
+    if(NOT CMAKE_CROSSCOMPILING_EMULATOR)
+      find_program(_glassy_node node REQUIRED)
+      set(CMAKE_CROSSCOMPILING_EMULATOR "${_glassy_node}")
+    endif()
+  endif()
   include(FetchContent)
   # Git instead of release tarballs: the egress proxy blocks GitHub archive downloads.
   FetchContent_Declare(googletest
