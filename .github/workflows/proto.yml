@@ -48,6 +48,9 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo nextest run --workspace --profile ci
       - run: cargo test --doc -p glassy-proto
+      # The fuzz crate is excluded from the workspace, so check it explicitly.
+      - run: cargo fmt --check --manifest-path crates/glassy-proto/fuzz/Cargo.toml
+      - run: cargo clippy --manifest-path crates/glassy-proto/fuzz/Cargo.toml --all-targets -- -D warnings
       - name: Regenerate vectors and require no diff
         run: |
           cargo nextest run -p glassy-proto --profile ci --run-ignored only -E 'test(/^write_/)'
@@ -92,7 +95,7 @@ jobs:
       # Always MinSizeRel: check_size.sh refuses any other build type.
       - run: |
           cmake -S cpp/glassy-proto -B build-size -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DGLASSY_PROTO_TESTS=OFF
+            -DGLASSY_PROTO_TESTS=OFF -DGLASSY_PROTO_SERVER=OFF
           cmake --build build-size --parallel 2 --target size_probe size_baseline
           cpp/glassy-proto/tools/check_size.sh build-size
 
@@ -131,5 +134,9 @@ jobs:
           cargo build -p glassy-proto-cli
           cmake -S cpp/glassy-proto -B build -DCMAKE_BUILD_TYPE=Release -DGLASSY_PROTO_TESTS=OFF
           cmake --build build --parallel 2 --target glassy_proto_cli
+      - name: Seeds are in sync with vectors
+        run: |
+          scripts/differential.sh --seed
+          test -z "$(git status --porcelain fuzz/seeds)"
       - name: Differential over seeds and the fuzz corpus
         run: scripts/differential.sh fuzz/seeds build-fuzz/corpus

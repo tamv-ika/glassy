@@ -12,6 +12,10 @@ else()
 endif()
 option(GLASSY_PROTO_SERVER "Build the server-side sources" ${_glassy_server_default})
 option(GLASSY_PROTO_TESTS "Build the tests" ON)
+if(EMSCRIPTEN AND GLASSY_PROTO_SERVER)
+  message(FATAL_ERROR "GLASSY_PROTO_SERVER is not supported with Emscripten: the server side "
+    "needs nettle, which has no WASM build. Configure with -DGLASSY_PROTO_SERVER=OFF.")
+endif()
 option(GLASSY_PROTO_SANITIZE "Build our targets and tests with ASan and UBSan (clang)" OFF)
 option(GLASSY_PROTO_FUZZ "Build the libFuzzer targets in fuzz/ with ASan and UBSan (clang)" OFF)
 
